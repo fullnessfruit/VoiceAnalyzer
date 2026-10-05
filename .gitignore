@@ -218,3 +218,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# VoiceAnalyzer runtime files
+pretrained_models/
+
+work/**
+!work/.gitkeep
+cache/**
+!cache/.gitkeep
+data/**
+!data/.gitkeep
+
+refs/**/*.wav
+s5wMJDoZUyXedEIP.mp4
+git-config - コピー.bat
