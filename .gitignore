@@ -231,3 +231,6 @@ data/**
 refs/**/*.wav
 s5wMJDoZUyXedEIP.mp4
 git-config - コピー.bat
+# Local-only. Empty templates are in the previous commit.
+git-config.bat
+commit-msg.bat
