@@ -5,6 +5,9 @@ setlocal
 cd /d "%~dp0"
 
 echo === VoiceAnalyzer Uninstall ===
+echo Keeping shared OCR_BROKER_SECRET for ImageAnalyzer and other clients.
+echo To delete ONLY the shared key, run: "%~dp0delete-shared-secret.bat"
+echo Doing so requires reconfiguring both analyzers and their clients together.
 
 if not exist ".venv\" goto :absent
 

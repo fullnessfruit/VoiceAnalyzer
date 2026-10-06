@@ -80,6 +80,18 @@ POSIX:
 Both listen on `127.0.0.1:8000` and use `.venv` when that directory exists. `HOST` and `PORT`
 override the bind address. The same process is `uvicorn app.main:app`.
 
+The installer prepares the shared `OCR_BROKER_SECRET` used by ImageAnalyzer and the OCR
+broker. It reuses an existing user key, regardless of which analyzer was installed first.
+An explicit process environment value takes precedence at runtime; otherwise the server
+reads the Windows user environment or the shared POSIX file
+`${XDG_CONFIG_HOME:-~/.config}/announcement-analyzers/auth.json`.
+Installation does not start the server or run inference.
+
+Uninstall keeps this key and prints the separate removal command. To delete **only** the
+shared key, run `delete-shared-secret.bat` or `sh delete-shared-secret.sh`. Both analyzers,
+the broker, and their clients must then be configured with the same replacement key.
+Existing services and terminals retain their old environment until restarted.
+
 Thresholds and the clustering distance are in `config.yaml` at the repository root.
 
 ```yaml
@@ -121,10 +133,10 @@ Use the same kind of performance you want to find. Interview audio for an interv
 speaking style for a broadcast appearance, and line readings in a similar tone for anime or film.
 Mixing different kinds of audio lowers the score even for the same person.
 
-Rebuild the cache:
+Rebuild the cache with an authenticated `POST /v1/enroll` request:
 
-```bash
-curl -X POST http://127.0.0.1:8000/v1/enroll -H "Content-Type: application/json" -d "{\"speaker_id\":\"seiyuu_a\"}"
+```json
+{"speaker_id": "seiyuu_a"}
 ```
 
 An empty body rebuilds every speaker under `refs/`.
@@ -156,6 +168,15 @@ region inside that cluster closest to the target speaker. `segments` lists that 
 when `present` is true, and is an empty array otherwise.
 
 ## API
+
+All routes except `GET /health` require the same OCR1 HMAC-SHA256 protocol as ImageAnalyzer.
+Unsigned curl requests are rejected. Send `Authorization: OCR1 ts=<milliseconds>,nonce=<hex>,sig=<hex>`;
+`sig` signs `METHOD\npath+query\nts\nnonce\nSHA256(raw body)` with `OCR_BROKER_SECRET`.
+Use a fresh random nonce for each request and synchronize client/server clocks (±2 minutes).
+Verify `X-Ocr-Signature` on the response: it signs `nonce\nSHA256(raw response bytes)`.
+The AnnouncementAggregator `voice-analyzer/client.js` and manual CLI implement both sides
+of this client protocol; automatic searches and notifications do not call VoiceAnalyzer.
+The key itself is never transmitted. A missing key prevents server startup.
 
 Put the file to compare under `data/`. A path outside `data/` returns 403. A file over 2 GiB or
 longer than 3 hours returns 400. Temp files under `work/` are removed when the request finishes.

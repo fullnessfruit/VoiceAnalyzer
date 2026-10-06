@@ -44,7 +44,7 @@
 
 진입점은 `uvicorn app.main:app`. Windows는 `server.bat`, POSIX는 `server.sh`가 그 명령을 실행한다.
 의존성은 `install.bat`와 `install.sh`가 `.venv`에 넣는다. 가중치는 설치 스크립트가 받지 않는다.
-`uninstall.bat`와 `uninstall.sh`는 그 `.venv`만 지운다.
+`uninstall.bat`와 `uninstall.sh`는 그 `.venv`만 지우고 공유 인증 키는 보존한다. 키만 지우는 `delete-shared-secret.bat` / `.sh`를 별도로 둔다.
 `app = create_app()` 이 임포트 시점에 `config.yaml`을 읽고 `data/` `refs/` `work/` `cache/` 를 만든다.
 
 ## 핵심 아키텍처 결정
@@ -422,10 +422,31 @@ Annotation으로 보고 `itertracks(yield_label=True)`한다. pyannote 3.x Annot
 `_clusters`는 라벨 문자열이 키다. 등장 순서를 유지한다.
 `_payload`는 `best`와 `reason`이 비면 키를 뺀다. `segments`는 항상 넣는다.
 
+### app/shared_secret.py
+**역할**: ImageAnalyzer 및 OCR 브로커와 같은 `OCR_BROKER_SECRET`을 공유한다. 별도 인증 키 이름을 만들지 않는다.
+
+- `_stored_secret()` / `_secret_path()`: Windows `HKCU\Environment`의 사용자 환경 변수, POSIX `${XDG_CONFIG_HOME:-~/.config}/announcement-analyzers/auth.json`의 같은 이름 필드를 읽는다. 다른 프로젝트의 설치가 만든 키도 같은 저장 위치라 재사용한다. 잘못된 저장 파일은 오류이며 자동 교체하지 않는다.
+- `read_secret()` / `require_secret()`: 명시적인 프로세스 환경 변수가 우선하고, 없을 때 저장 키를 읽는다. 필수 조회는 키가 없으면 오류다. 서버 실행만으로 새 키를 생성하지 않는다.
+- `ensure_secret()`: 설치만 호출한다. 저장 키 우선, 없으면 기존 프로세스 키를 저장, 둘 다 없으면 암호 RNG 32바이트 hex를 생성한다. 오래된 터미널이 다른 분석기의 설치 키를 덮어쓰지 않는다. POSIX는 0600 임시 파일을 완성한 뒤 hard link로 게시하므로 동시 설치도 기존 파일을 덮어쓰지 않는다.
+- `_notify_windows_environment()`: 사용자 환경 변수 변경을 Explorer에 알린다. 이미 실행 중인 프로세스의 환경은 바뀌지 않는다.
+- `delete_secret()`: 명시적으로 사용자 환경 변수 또는 공유 키 파일만 삭제한다. 일반 uninstall은 호출하지 않는다. 이미 키가 없어도 성공하며 다른 파일·실행 중 서버·등록 샘플은 건드리지 않는다.
+- CLI `ensure`는 키 내용을 숨기고 준비 상태만 출력한다. `show`는 다른 머신이나 확장 설정에 복사할 저장 키를 명시적으로 출력하며, `delete`는 삭제 후 두 분석기·클라이언트의 재설정과 프로세스 재시작 필요를 안내한다.
+
+### app/auth.py
+**역할**: ImageAnalyzer의 OCR 브로커와 동일한 OCR1 요청·응답 HMAC-SHA256 인증. 키 자체는 HTTP에 보내지 않는다.
+
+`OcrAuthMiddleware(app, secret, booted_at_ms)`는 ASGI 계층에서 JSON 파싱·파일 검사·모델 접근 전에 요청을 검증한다. 무서명 예외는 `GET /health`뿐이다. 등록·조회·분석·문서 경로는 모두 인증이 필요하다.
+
+- `Authorization: OCR1 ts=<milliseconds>,nonce=<hex>,sig=<hex>`의 서명 입력은 `METHOD\npath+query\nts\nnonce\nSHA256(raw body)`다. 경로는 percent-encoding을 보존하고 본문은 받은 바이트 그대로 해시한다.
+- 시계 차이 ±2분, 앱 생성 이전 timestamp 거부, nonce 재사용 거부. 유효 서명 확인 후 nonce를 기록하며 검증과 기록 사이에는 await가 없어 같은 프로세스의 동시 재전송도 막는다. 서버 실행 스크립트는 uvicorn 단일 프로세스다.
+- 본문은 최대 1MiB. 인증 실패·과대 본문은 라우터에 전달하지 않는다. 검증한 본문을 ASGI receive로 한 번 다시 전달한다.
+- `signed_send`는 완성된 응답 바이트를 모아 `nonce\nSHA256(response bytes)`를 HMAC으로 서명하고 `X-Ocr-Signature` 헤더를 붙인다. 라우터의 HTTP 오류 응답도 서명한다. 인증 전 거절에는 서명이 없고, 외곽 서버가 생성한 처리되지 않은 오류 역시 클라이언트가 정상 결과로 신뢰하지 않는다.
+- `_error`는 인증 전 거절 응답을 보낸다. 키·서명·본문을 로그에 남기지 않는다.
+
 ### app/main.py
 **역할**: 라우트와 상태 코드. 임베딩을 계산하지 않는다.
 
-`create_app`은 넘긴 `Config`가 없으면 `load_config()`다. 현재 테스트는 기본 `app`만 쓴다.
+`create_app`은 `require_secret()`으로 인증 키가 있는지 먼저 검사하고, 없으면 기동을 거부한다. 넘긴 `Config`가 없으면 `load_config()`다. 앱 생성 시각을 재전송 방지 기준으로 잡아 `OcrAuthMiddleware`를 등록한다. 미들웨어의 지연 생성 시각을 쓰면 첫 요청이 기동 전 요청으로 오인될 수 있어 앱 생성 시각을 전달한다.
 핸들러는 `settings`를 클로저로 잡는다.
 
 `/health`는 `{"status": "ok"}`만 반환한다.
@@ -489,6 +510,8 @@ Windows venv는 `Scripts\python.exe`, POSIX venv는 `bin/python`이다. `install
 없으면 경고만 한다. 설치 실패가 아니다. 매치 시점에는 ffmpeg가 없으면 500, 미디어를 읽지
 못하면 400이다.
 
+의존성 설치 뒤 `app/shared_secret.py ensure`로 공유 키를 준비한다. 설치 순서는 ImageAnalyzer가 먼저든 VoiceAnalyzer가 먼저든 무관하다. 서버·분석은 설치가 시작하지 않는다. 다른 머신끼리는 같은 키를 사용자가 설정해야 한다.
+
 끝나면 등록 wav 위치, `data/`에 둘 미디어, 선택적 `HUGGINGFACE_TOKEN`, `server.bat` 또는
 `./server.sh`를 출력한다.
 
@@ -496,7 +519,7 @@ bat는 변수를 괄호 블록 안에서 세우지 않고 `goto`로 나눈다. �
 피하기 위해서다. 성공 시 `pause`는 없다.
 
 ### uninstall.bat / uninstall.sh
-**역할**: `install`이 만든 `.venv`만 지운다. 앱 코드는 부르지 않는다.
+**역할**: `install`이 만든 `.venv`만 지운다. 앱 코드는 부르지 않는다. `OCR_BROKER_SECRET`을 보존하며 키만 삭제하려면 `delete-shared-secret.bat` / `.sh`를 실행하라는 안내와 ImageAnalyzer도 같은 키로 재설정해야 한다는 안내를 항상 출력한다.
 
 소스, `config.yaml`, `refs/`, `data/`, `cache/`는 설치물이 아니라서 남긴다. 등록 wav, 검색할
 미디어, 서버 실행 뒤에 생긴 ECAPA 가중치(`cache/models/ecapa`)와 등록 평균(`cache/enroll`)을
@@ -508,3 +531,7 @@ bat는 변수를 괄호 블록 안에서 세우지 않고 `goto`로 나눈다. �
 있으면 거절한다. sh는 `-L`이면 거절한다. 서버가 `.venv`의 파이썬을 열고 있으면 삭제가 중간에
 멈추고, 디렉터리가 남아 있으면 실패다. 서버를 끈 뒤 다시 실행하면 이어서 지운다. 성공 시
 `pause`는 없다.
+
+### delete-shared-secret.bat / delete-shared-secret.sh
+**역할**: `app/shared_secret.py delete`만 실행하는 명시적 공유 키 제거 도구. 일반 uninstall과 별개이며 프로그램·데이터는 삭제하지 않는다.
+`.venv`가 있으면 그 Python을, 이미 uninstall해서 없으면 시스템 Python을 사용한다. 두 분석기와 OCR 브로커·클라이언트가 이 키를 공유한다는 안내를 출력한다. 저장 키를 지워도 실행 중인 서버와 터미널은 이전 환경을 유지하므로 키 재설정 뒤 함께 재시작해야 한다.

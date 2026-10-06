@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
+from app.auth import OcrAuthMiddleware
+from app.shared_secret import require_secret
 from app.config import Config, load_config
 from app.enroll import enroll_speakers, list_speakers, speaker_has_wavs
 from app.models import get_hub
@@ -17,9 +20,12 @@ from app.schemas import EnrollRequest, MatchRequest
 
 
 def create_app(config: Config | None = None) -> FastAPI:
+    secret = require_secret()
+    booted_at_ms = int(time.time() * 1000)
     settings = config or load_config()
     app = FastAPI(title="VoiceAnalyzer", version="1.0.0")
     app.state.config = settings
+    app.add_middleware(OcrAuthMiddleware, secret=secret, booted_at_ms=booted_at_ms)
 
     @app.get("/health")
     def health() -> dict:

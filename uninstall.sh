@@ -4,6 +4,9 @@
 cd "$(dirname "$0")" || exit 1
 
 echo "=== VoiceAnalyzer Uninstall ==="
+echo "Keeping shared OCR_BROKER_SECRET for ImageAnalyzer and other clients."
+echo "To delete ONLY the shared key, run: $(dirname "$0")/delete-shared-secret.sh"
+echo "Doing so requires reconfiguring both analyzers and their clients together."
 
 if [ -L ".venv" ]; then
   echo ".venv is a link. Refusing to remove it." >&2

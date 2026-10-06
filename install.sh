@@ -80,6 +80,9 @@ if ! "$VPY" -m pip install -r requirements.txt; then
   exit 1
 fi
 
+echo "Preparing the shared ImageAnalyzer and VoiceAnalyzer authentication key"
+"$VPY" app/shared_secret.py ensure
+
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "WARNING: ffmpeg is not on PATH. The server cannot read media until ffmpeg is installed." >&2
 fi
