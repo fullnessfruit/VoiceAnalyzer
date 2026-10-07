@@ -35,28 +35,3 @@ class EnrollRequest(BaseModel):
         if value is None:
             return None
         return _speaker_id(value)
-
-
-class SegmentScore(BaseModel):
-    start: float
-    end: float
-    ecapa: float
-    wespeaker: float | None = None
-
-
-class BestScore(BaseModel):
-    start: float
-    end: float
-    ecapa: float
-    wespeaker: float | None = None
-
-
-class MatchResponse(BaseModel):
-    present: bool
-    speaker_id: str
-    ensemble: bool
-    bgm_separated: bool
-    diarization: str
-    best: BestScore | None = None
-    segments: list[SegmentScore] = Field(default_factory=list)
-    reason: str | None = None

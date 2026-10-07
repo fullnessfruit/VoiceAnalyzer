@@ -20,7 +20,7 @@ from app.diarize import cluster_labels, label_vad_with_turns, speech_regions_fro
 from app.enroll import embed_waveform, embed_wespeaker, load_enrollments
 from app.models import get_hub, huggingface_token
 from app.paths import PathRejected
-from app.scoring import SpeechSegment, SpeakerCluster, decide
+from app.scoring import SpeechSegment, SpeakerCluster, decide_references
 
 logger = logging.getLogger("voiceanalyzer")
 
@@ -48,8 +48,8 @@ def match_file(config: Config, media: Path, speaker_id: str, separate_bgm: bool)
                     _separate_vocals(hub, extracted, vocals, config.sample_rate)
                     vocal_path = vocals
                     bgm_separated = True
-                except Exception:
-                    logger.exception("demucs failed; using the original mix")
+                except Exception as exc:
+                    logger.error("demucs failed; using original mix - error=%r", exc)
                     vocal_path = extracted
                     bgm_separated = False
 
@@ -93,9 +93,11 @@ def match_file(config: Config, media: Path, speaker_id: str, separate_bgm: bool)
             # A speaker cached before WeSpeaker loaded has no second vector.
             # load_enrollments rebuilds those, so this is only a guard.
             use_ensemble = ensemble and all(
-                item.wespeaker is not None for item in enrollments.values()
+                item.wespeaker is not None
+                and all(reference.wespeaker is not None for reference in item.references)
+                for item in enrollments.values()
             )
-            decision = decide(
+            decision = decide_references(
                 clusters,
                 enrollments,
                 speaker_id,
@@ -155,8 +157,8 @@ def _speaker_segments(hub, config, vocal_path, samples, sample_rate, regions, en
             if labeled_by_pyannote:
                 return segments, "pyannote"
             logger.warning("pyannote produced no usable speaker segment; using clustering")
-        except Exception:
-            logger.exception("pyannote diarization failed; falling back to clustering")
+        except Exception as exc:
+            logger.error("pyannote diarization failed; using clustering - error=%r", exc)
 
     embedded = []
     for start, end in regions:
@@ -164,13 +166,12 @@ def _speaker_segments(hub, config, vocal_path, samples, sample_rate, regions, en
         if len(piece) == 0:
             continue
         ecapa, _wespeaker = embed_waveform(hub, piece, sample_rate, ensemble=False)
-        embedded.append((start, end, ecapa))
+        embedded.append((start, end, piece, ecapa))
     if not embedded:
         return [], "clustering"
-    labels = cluster_labels([item[2] for item in embedded], config.cluster_distance)
+    labels = cluster_labels([item[3] for item in embedded], config.cluster_distance)
     segments = []
-    for (start, end, ecapa), label in zip(embedded, labels):
-        piece = slice_audio(samples, sample_rate, start, end)
+    for (start, end, piece, ecapa), label in zip(embedded, labels):
         wespeaker = embed_wespeaker(hub, piece, sample_rate) if ensemble else None
         segments.append((label, SpeechSegment(start, end, ecapa, wespeaker)))
     return segments, "clustering"

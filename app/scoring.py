@@ -33,10 +33,18 @@ class SpeakerCluster:
     segments: list[SpeechSegment] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ReferenceEmbedding:
+    name: str
+    ecapa: np.ndarray
+    wespeaker: np.ndarray | None = None
+
+
 @dataclass
 class Enrollment:
     ecapa: np.ndarray
     wespeaker: np.ndarray | None = None
+    references: tuple[ReferenceEmbedding, ...] = ()
 
 
 @dataclass
@@ -197,3 +205,125 @@ def decide(
         "wespeaker": winner["wespeaker"],
     }
     return MatchDecision(present=True, best=best, segments=winner["segments"])
+
+
+def decide_references(
+    clusters: list[SpeakerCluster],
+    enrollments: dict[str, Enrollment],
+    speaker_id: str,
+    thresholds: Thresholds,
+    ensemble: bool,
+) -> MatchDecision:
+    """Compare each speaker cluster with each performance of the requested actor.
+
+    Both active models must pass on the same reference. A cluster's multiple
+    regions provide one pooled voice sample, while the reference performances
+    remain separate. The strongest competing actor score supplies each margin.
+    """
+    if speaker_id not in enrollments:
+        raise KeyError(speaker_id)
+    target = enrollments[speaker_id]
+    if not target.references:
+        raise ValueError(f"{speaker_id} has no reference embeddings")
+
+    others = {name: item for name, item in enrollments.items() if name != speaker_id}
+    candidates: list[dict] = []
+    for cluster in clusters:
+        if not cluster.segments:
+            continue
+        ecapa_mean = average_embeddings([segment.ecapa for segment in cluster.segments])
+        wespeaker_mean = None
+        if ensemble:
+            if any(segment.wespeaker is None for segment in cluster.segments):
+                continue
+            wespeaker_mean = average_embeddings(
+                [segment.wespeaker for segment in cluster.segments]
+            )
+
+        for reference in target.references:
+            ecapa = cosine(ecapa_mean, reference.ecapa)
+            if ecapa < thresholds.ecapa_min:
+                continue
+            wespeaker = None
+            if ensemble:
+                if reference.wespeaker is None:
+                    raise RuntimeError("missing wespeaker reference in ensemble decision")
+                wespeaker = cosine(wespeaker_mean, reference.wespeaker)
+                if wespeaker < thresholds.wespeaker_min:
+                    continue
+
+            passes_margin = True
+            for other_name, other in others.items():
+                other_refs = other.references or (
+                    ReferenceEmbedding(other_name, other.ecapa, other.wespeaker),
+                )
+                other_ecapa = max(cosine(ecapa_mean, item.ecapa) for item in other_refs)
+                if ecapa < other_ecapa + thresholds.margin:
+                    passes_margin = False
+                    break
+                if ensemble:
+                    if any(item.wespeaker is None for item in other_refs):
+                        raise RuntimeError(f"{other_name} has no wespeaker enrollment")
+                    other_wespeaker = max(
+                        cosine(wespeaker_mean, item.wespeaker) for item in other_refs
+                    )
+                    if wespeaker < other_wespeaker + thresholds.margin:
+                        passes_margin = False
+                        break
+            if not passes_margin:
+                continue
+
+            per_segment = []
+            for segment in cluster.segments:
+                segment_ecapa = cosine(segment.ecapa, reference.ecapa)
+                segment_wespeaker = (
+                    cosine(segment.wespeaker, reference.wespeaker) if ensemble else None
+                )
+                per_segment.append(
+                    {
+                        "start": _round_time(segment.start),
+                        "end": _round_time(segment.end),
+                        "ecapa": _round_score(segment_ecapa),
+                        "wespeaker": (
+                            None if segment_wespeaker is None else _round_score(segment_wespeaker)
+                        ),
+                        "reference": reference.name,
+                        "_rank": _segment_rank(segment_ecapa, segment_wespeaker, ensemble),
+                        "_start": segment.start,
+                    }
+                )
+            representative = min(
+                per_segment,
+                key=lambda item: (-item["_rank"], item["_start"]),
+            )
+            candidates.append(
+                {
+                    "start": representative["start"],
+                    "end": representative["end"],
+                    "ecapa": _round_score(ecapa),
+                    "wespeaker": None if wespeaker is None else _round_score(wespeaker),
+                    "reference": reference.name,
+                    "_rank": _segment_rank(ecapa, wespeaker, ensemble),
+                    "_start": representative["_start"],
+                    "segments": [
+                        {key: value for key, value in item.items() if not key.startswith("_")}
+                        for item in sorted(per_segment, key=lambda item: item["_start"])
+                    ],
+                }
+            )
+
+    if not candidates:
+        return MatchDecision(present=False, best=None, segments=[])
+    winner = min(
+        candidates,
+        key=lambda item: (-item["_rank"], item["_start"], item["reference"]),
+    )
+    return MatchDecision(
+        present=True,
+        best={
+            key: value
+            for key, value in winner.items()
+            if key not in ("_rank", "_start", "segments")
+        },
+        segments=winner["segments"],
+    )

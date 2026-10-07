@@ -126,12 +126,12 @@ restarted. Each model is loaded once per process. Inference runs in a thread poo
 
 ## Reference samples
 
-Put one or more wav files in `refs/{speaker_id}/*.wav`. The stored vector is the mean of those
-files. Nothing is trained.
+Put one or more wav files in `refs/{speaker_id}/*.wav`. Each file is cached as a separate voice
+reference for that speaker; nothing is trained. A mean vector is also cached for comparison with
+the former method, but the server does not use it to decide presence.
 
-Use the same kind of performance you want to find. Interview audio for an interview, a similar
-speaking style for a broadcast appearance, and line readings in a similar tone for anime or film.
-Mixing different kinds of audio lowers the score even for the same person.
+Include different performance styles of the same actor under one speaker ID. A matching style
+can help, and each reference remains available without being diluted by the others.
 
 Rebuild the cache with an authenticated `POST /v1/enroll` request:
 
@@ -142,7 +142,7 @@ Rebuild the cache with an authenticated `POST /v1/enroll` request:
 An empty body rebuilds every speaker under `refs/`.
 
 You can also replace one speaker from wav files under `data/`. A path outside `data/` returns 403.
-The files are copied into `refs/{speaker_id}/` and the mean is cached.
+The files are copied into `refs/{speaker_id}/` and embedded individually.
 
 ```json
 {"speaker_id": "seiyuu_a", "file_paths": ["data/enroll/a1.wav", "data/enroll/a2.wav"]}
@@ -156,16 +156,17 @@ The files are copied into `refs/{speaker_id}/` and the mean is cached.
 3. silero-vad finds speech. Silence of 0.4 seconds or less is merged. Regions shorter than 3 seconds
    are dropped.
 4. With a token, pyannote assigns speakers. Without one, ECAPA agglomerative clustering does.
-5. Each speaker cluster becomes the mean embedding of its regions of at least 3 seconds. Comparison
-   uses `speechbrain/spkrec-ecapa-voxceleb` and the WeSpeaker VoxCeleb embedding.
-6. A cluster is a candidate only when both models are at or above their own thresholds. Without
-   WeSpeaker, only the ECAPA threshold applies.
-7. Among candidates, the cluster with the highest score for the target speaker must beat every other
-   enrolled speaker by `margin`. `present` is then true. A single enrolled speaker skips the margin.
+5. Regions of at least 3 seconds are averaged within each speaker cluster. The target actor's
+   reference files are compared individually to that cluster embedding.
+6. A cluster is a candidate when the **same reference file** passes both model thresholds. Without
+   WeSpeaker, only the ECAPA threshold applies. Scores from different reference files are never combined.
+7. A candidate must lead every other enrolled speaker's strongest reference by `margin` on each
+   active model. A single enrolled speaker skips the margin. The highest scoring candidate wins.
 
-`best.ecapa` and `best.wespeaker` are the cluster-mean scores. `best.start` and `best.end` are the
-region inside that cluster closest to the target speaker. `segments` lists that cluster's regions
-when `present` is true, and is an empty array otherwise.
+`best.ecapa` and `best.wespeaker` compare the winning reference with the cluster mean.
+`best.reference` names that reference wav. `best.start` and `best.end` show the region inside that
+cluster closest to the winning reference. `segments` lists that cluster's region scores for the same
+reference when `present` is true, and is an empty array otherwise.
 
 ## API
 
@@ -196,9 +197,9 @@ When the speaker is present:
   "ensemble": true,
   "bgm_separated": true,
   "diarization": "pyannote",
-  "best": {"start": 754.2, "end": 761.8, "ecapa": 0.78, "wespeaker": 0.71},
+  "best": {"start": 754.2, "end": 761.8, "ecapa": 0.78, "wespeaker": 0.71, "reference": "sample01.wav"},
   "segments": [
-    {"start": 754.2, "end": 761.8, "ecapa": 0.79, "wespeaker": 0.72}
+    {"start": 754.2, "end": 761.8, "ecapa": 0.79, "wespeaker": 0.72, "reference": "sample01.wav"}
   ]
 }
 ```

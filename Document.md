@@ -79,19 +79,26 @@ VAD와 pyannote 경계가 0.2초쯤 어긋나면 그 틈이 다른 라벨이 되
 unassigned 조각은 서로 다른 id라 한 군집으로 평균되지 않는다. 미분류 구간을 한 사람으로 묶지
 않기 위해서다.
 
-### 군집 점수는 구간 임베딩의 평균이고, 대표 시각은 그중 한 구간이다
-각 3초 이상 구간을 하나의 벡터로 만든 뒤, 군집 안 벡터를 다시 평균한다. 길이에 비례해 가중하지
-않는다. `best.start`/`end`는 대상 성우와 구간 점수가 가장 높은 구간(동점이면 더 이른 시작)이다.
-`best.ecapa`/`wespeaker`는 그 구간 점수가 아니라 군집 평균의 코사인이다. 임계값과 마진이 보는
-숫자와 응답의 best 점수를 같게 두기 위해서다.
+### 한 성우의 연기 샘플은 개별 참조이며, 판정은 화자 군집 단위다
+등록 wav마다 ECAPA와 WeSpeaker 벡터 한 쌍을 보존한다. 같은 성우의 다른 배역·연기 톤을
+서로 다른 화자로 경쟁시키지 않고 대체 가능한 참조로 취급한다. 7개 평균 벡터는 기존 방식
+재현용으로 캐시에 함께 두지만 서버 판정에는 쓰지 않는다.
 
-마진은 활성 모델마다 따로 본다. ECAPA는 통과하고 WeSpeaker만 다른 성우와 0.05 안쪽이면 후보가
-아니다. 등록 성우가 대상 한 명이면 `others`가 비어 마진을 건너뛴다. 비교는 `>= other + margin`이다.
+각 3초 이상 발화 구간을 임베딩하고, 같은 화자 라벨의 구간 벡터를 모델별로 동일 가중 평균한다.
+`decide_references`는 군집 평균을 대상 성우의 참조 각각과 비교한다. 앙상블에서는 **같은 참조**가
+ECAPA와 WeSpeaker 임계값을 모두 넘어야 후보가 된다. 두 모델의 최고점이 서로 다른 참조에서
+나왔으면 합쳐서 통과시키지 않는다. 여러 구간을 합친 군집은 개별 구간보다 점수가 높을 수도 있어,
+구간별 판정만 하지 않는다.
 
-후보가 여러 개면 활성 모델 점수의 평균이 큰 군집을 고르고, 같으면 대표 구간의 시작이 이른 쪽이다.
+다른 등록 성우가 있으면 그 성우의 참조 중 모델별 최고점을 경쟁 점수로 쓴다. 대상 후보의
+각 모델 점수가 경쟁 점수보다 `margin` 이상 높아야 한다. 대상 한 명만 등록되면 마진을 건너뛴다.
+후보가 여러 개면 활성 모델 점수의 평균이 높은 군집·참조 쌍을 고르고, 동점이면 대표 구간 시작,
+참조 이름순이다.
 
-`present`가 false면 `segments`는 빈 배열이다. 탈락 군집의 점수는 응답에 넣지 않는다.
-`present`가 true면 `segments`는 이긴 군집의 구간별 대상 성우 코사인이다.
+`best.ecapa`/`wespeaker`는 이긴 참조와 군집 평균의 raw cosine이다. `best.start`/`end`는
+그 참조와 구간 점수 평균이 가장 높은 군집 내 구간의 시각이다. `best.reference`는 사용한 wav
+이름이다. `segments`는 이긴 군집의 각 구간 점수와 같은 참조 이름을 담는다. `present`가 false면
+`best`가 없고 `segments`는 빈 배열이다. 기존 평균 참조의 `decide`는 내부 비교 실험에 남는다.
 
 ### 긴 파형은 30초 비중첩 창의 평균으로 한 벡터가 된다
 ECAPA와 WeSpeaker에 수 분 구간을 한 번에 넣으면 메모리와 시간이 구간 길이에 비례한다.
@@ -130,18 +137,17 @@ Windows에서는 `relative_to`가 대소문자를 구분하므로 `os.path.normc
 크기와 길이는 `config.py` 상수다. `config.yaml`로 바꾸지 않는다. 2 GiB 또는 3시간과 같으면
 허용하고, 초과만 400이다.
 
-### 등록 캐시는 wav 지문과 앙상블 여부를 함께 본다
-`cache/enroll/{speaker_id}.npz`에 ECAPA, WeSpeaker, sha256 지문을 넣는다. 지문은 파일 이름,
-크기, `mtime_ns`다. 내용이 같아도 이름이 바뀌면 다시 계산한다.
+### 등록 캐시는 개별 참조, 평균, wav 지문, 앙상블 여부를 함께 본다
+`cache/enroll/{speaker_id}.npz`에 각 wav의 이름과 두 모델 임베딩 배열, 기존 방식 비교용
+평균 벡터, sha256 지문을 넣는다. 지문은 파일 이름·크기·`mtime_ns`다. 이름이 바뀌면 다시 계산한다.
+구 캐시는 개별 참조 배열이 없으므로 미스로 보고 새 형식으로 다시 만든다.
 
-`load_enrollments`(`force=False`)는 지문이 같고, 앙상블이 켜져 있으면 WeSpeaker 벡터가 비어 있지
-않을 때만 캐시를 쓴다. WeSpeaker를 나중에 읽게 된 프로세스에서는 빈 벡터 캐시를 버리고 다시
-임베딩한다. `enroll_speakers`는 `force=True`라 지문이 같아도 다시 계산한다.
-
-WeSpeaker가 없는 프로세스가 쓴 캐시는 `wespeaker`를 길이 0 배열로 저장한다.
+`load_enrollments`(`force=False`)는 지문이 같고, 앙상블이 켜졌으면 모든 참조에 WeSpeaker 벡터가
+있을 때만 캐시를 쓴다. `enroll_speakers`는 `force=True`라 지문이 같아도 재계산한다.
+WeSpeaker를 쓰지 않은 캐시는 평균과 개별 참조의 WeSpeaker 배열을 길이 0으로 저장한다.
 
 ### BGM 분리 실패는 원본 믹스다
-`separate_bgm`이 false면 demucs를 로드하지 않는다. true인데 예외가 나면 로그 한 줄(exception)을
+`separate_bgm`이 false면 demucs를 로드하지 않는다. true인데 예외가 나면 오류 repr을 한 줄로
 남기고 16 kHz 추출본을 그대로 쓴다. `bgm_separated`는 false다. vocals 스템이 없거나 샘플레이트를
 읽지 못해도 같은 경로다.
 
@@ -162,7 +168,7 @@ WeSpeaker가 없는 프로세스가 쓴 캐시는 `wespeaker`를 길이 0 배열
    이때 `diarization`은 토큰이 있으면 `pyannote`, 없으면 `clustering`이다. 실제로 돌렸는지는
    보지 않는다.
 7. pyannote가 있으면 턴과 VAD를 교차. 사용 가능한 화자 라벨이 없으면 ECAPA 군집화.
-8. 구간 임베딩 후 `decide`. 등록 캐시가 오래됐으면 락 안에서 그 성우 wav를 다시 임베딩한다.
+8. 구간 임베딩 후 화자별 군집을 만들고 `decide_references`로 개별 참조를 비교한다. 등록 캐시가 오래됐으면 락 안에서 wav를 다시 임베딩한다.
 9. `finally`에서 요청 디렉터리를 지운다. 등록 캐시 npz는 `cache/`에 남는다.
 
 `POST /v1/enroll`
@@ -228,9 +234,9 @@ Windows에서 `refs/`와 `cache/enroll/` 파일 이름이 되게 하기 위해�
 `MatchRequest.separate_bgm` 기본값은 true다.
 `EnrollRequest`의 두 필드는 모두 선택이다. 빈 POST 본문은 `None`이라 `EnrollRequest()`가 된다.
 
-`MatchResponse`는 OpenAPI용이다. 실제 `/v1/match`는 `pipeline._payload` dict를 `JSONResponse`로
-내므로 `MatchResponse`로 직렬화하지 않는다. `best`와 `reason`은 값이 있을 때만 키를 넣는다.
-`wespeaker`가 None이면 JSON `null`로 남는다.
+`/v1/match`는 `pipeline._payload` dict를 `JSONResponse`로 낸다. 사용하지 않는 별도 응답
+스키마는 두지 않는다. `best`와 `reason`은 값이 있을 때만 키를 넣고, WeSpeaker가 꺼졌으면
+점수는 JSON `null`이다.
 
 ### app/audio.py
 **역할**: 우리가 만든 PCM wav와 ffmpeg. 포맷이 다양한 입력은 항상 ffmpeg를 거친 뒤 `wave`로 읽는다.
@@ -265,29 +271,27 @@ soundfile에 의존하지 않는다.
 `duration exceeds 3 hours`.
 
 ### app/scoring.py
-**역할**: 임베딩이 이미 있는 뒤의 판정. torch를 임포트하지 않아 테스트가 모델 없이 돈다.
+**역할**: 임베딩이 이미 있는 뒤의 판정. torch를 임포트하지 않아 모델 없는 단위 검증이 가능하다.
 
-`Thresholds`, `SpeechSegment`, `SpeakerCluster`, `Enrollment`, `MatchDecision`는 그 데이터의
-그릇이다. `SpeechSegment.wespeaker`와 `Enrollment.wespeaker`는 앙상블이 꺼지면 None이다.
+`Thresholds`, `SpeechSegment`, `SpeakerCluster`, `ReferenceEmbedding`, `Enrollment`,
+`MatchDecision`는 점수·구간·참조·결과를 담는다. `Enrollment.references`는 같은 성우의 wav별
+벡터 쌍이다. `Enrollment.ecapa`/`wespeaker`는 평균 참조 비교를 위해 함께 둔다.
 
-`cosine`은 영벡터를 0으로 두고, 차원이 다르면 `ValueError`다.
-`l2_normalize`도 영벡터를 그대로 둔다.
-`average_embeddings`는 각 벡터를 정규화하고 평균한 뒤 다시 정규화한다. 빈 리스트는 `ValueError`다.
-한 벡터면 그 방향이 유지된다.
+`cosine`은 영벡터를 0으로 두고 차원이 다르면 `ValueError`다. `l2_normalize`는 영벡터를
+그대로 둔다. `average_embeddings`는 입력 벡터별 정규화, 평균, 재정규화 순서이며 빈 입력은
+`ValueError`다. `_segment_rank`는 앙상블이면 두 점수 평균, 아니면 ECAPA다.
 
-`_segment_rank`는 앙상블이면 두 점수의 평균, 아니면 ECAPA다. 군집 선택과 대표 구간 선택에
-같이 쓴다.
+`decide_references`는 현재 서버 판정이다. 각 화자 군집의 구간 임베딩을 평균하고 대상 성우의
+참조를 하나씩 대조한다. 같은 참조에서 모든 활성 임계값을 넘어야 하며 다른 성우의 모델별
+최고 참조 점수에 대한 마진을 각각 검사한다. 등록 대상만 있으면 마진은 없다. 가장 높은 후보의
+군집 평균 점수, 사용한 참조 이름, 가장 잘 맞는 구간 시각을 `best`에 넣고 이긴 군집의 구간별
+점수를 `segments`에 넣는다. 후보가 없으면 `present=False`, `best=None`, `segments=[]`다.
+앙상블인데 참조 WeSpeaker가 없으면 오류, 구간 WeSpeaker가 빠진 군집은 건너뛴다.
 
-`decide`는 `speaker_id`가 `enrollments`에 없으면 `KeyError`다. HTTP 404는 그 전에
-`speaker_has_wavs`가 처리하고, 파이프라인은 캐시에 없으면 한 번 더 `PathRejected(404)`를 던진다.
-
-군집 루프에서 앙상블인데 구간 하나라도 WeSpeaker가 없으면 그 군집은 후보에서 빠진다.
-등록 쪽에 WeSpeaker가 없으면 `RuntimeError`다. `load_enrollments`가 앙상블일 때 빈 캐시를
-다시 계산하므로, 이 예외는 캐시와 플래그가 어긋난 가드다.
-
-마진 루프는 `others`가 있을 때만 돈다. 탈락 군집은 `candidates`에 들어가지 않는다.
-이길 군집의 `segments`만 `MatchDecision.segments`가 된다. 없으면 `present` false,
-`best` None, `segments` []다. `reason`은 여기서 채우지 않는다. `no_speech`는 파이프라인이 붙인다.
+`decide`는 기존 단일 평균 참조 판정의 내부 비교 실험용이다. 같은 군집 평균·마진·대표 시각을
+사용하지만 성우당 참조 벡터를 하나만 받는다. `speaker_id`가 없으면 두 함수 모두 `KeyError`다.
+HTTP 404는 `speaker_has_wavs`와 파이프라인의 등록 재확인이 담당한다. `reason=no_speech`는
+파이프라인만 붙인다.
 
 ### app/diarize.py
 **역할**: 시간 구간을 화자 라벨로 나누기까지. 임베딩 평균과 코사인은 하지 않는다.
@@ -324,7 +328,8 @@ silero가 병합 후 짧은 구간을 버리는 순서라, 3초 컷을 이 인�
 
 `ensemble` / `vad` / `ecapa` / `demucs` / `pyannote`는 락 안에서 지연 로드한다.
 `demucs()`는 `demucs.api.Separator(shifts=config.demucs_shifts, split=True, progress=False)`.
-`pyannote()`는 토큰이 없거나 이미 로드 실패면 None이다.
+`pyannote()`는 토큰이 없거나 이미 로드 실패면 None이다. 모델·분리 폴백의 오류 로그는
+예외 repr을 한 줄로 남긴다.
 
 `embed_ecapa`는 `[1, T]` float32를 `encode_batch`에 넣고 `_as_vector`로 1차원 float64를 만든다.
 `inference_mode` 안이다.
@@ -347,80 +352,56 @@ silero가 병합 후 짧은 구간을 버리는 순서라, 3초 컷을 이 인�
 `get_hub`는 모듈 전역 `_hub`를 `_hub_lock`으로 한 번만 만든다.
 
 ### app/enroll.py
-**역할**: `refs/{speaker_id}/*.wav`의 평균 벡터와 npz 캐시. 학습은 없다.
+**역할**: `refs/{speaker_id}/*.wav`를 각각 임베딩하고 npz에 캐시한다. 학습은 없다.
 
-`list_speakers`는 `{"speaker_id", "num_wavs"}` 목록이다. 캐시 유무는 포함하지 않는다.
-`speaker_has_wavs`는 그 디렉터리에 wav가 있는지만 본다.
+`list_speakers`는 `{"speaker_id", "num_wavs"}` 목록이다. `speaker_has_wavs`는 등록 wav
+존재만 본다. `_reference_wavs`는 점으로 시작하는 교체용 디렉터리를 건너뛰고 wav 접미사를
+대소문자 무시로 검사하며 이름순으로 정렬한다. `speaker_id`를 넘기면 그 디렉터리만 본다.
 
-`_reference_wavs`는 이름이 `.`으로 시작하는 디렉터리를 건너뛴다. 교체용
-`.{id}.staging`이 목록에 섞이지 않게 한다. wav 접미사는 대소문자 무시, 정렬은 이름 소문자다.
-`speaker_id`를 넘기면 그 디렉터리만 본다.
+`enroll_speakers`는 `source_wavs`가 있으면 락 밖에서 `_replace_references`를 먼저 한다.
+`source_wavs`에 `speaker_id`가 없거나 파일 목록이 비면 400이다. 락 안에서 활성 모델을 확인하고
+대상 성우를 `force=True`로 다시 임베딩한다. `load_enrollments`는 호출자가 이미 `hub.lock`을
+보유한다고 가정하며 `force=False`로 캐시를 쓴다. 작업 디렉터리는 `finally`에서 지운다.
 
-`enroll_speakers`는 `source_wavs is not None`일 때 `_replace_references`를 락 밖에서 먼저 한다.
-`speaker_id`가 없거나 리스트가 비면 `PathRejected` 400이다. 그 다음 락 안에서 `hub.ensemble()`을
-한 번 보고 대상 성우를 `force=True`로 임베딩한다. 반환 `ensemble`은 그 벡터에 WeSpeaker가
-실제로 있는지다. 작업 디렉터리 `work/enroll-{uuid}`는 `finally`에서 지운다.
+`embed_waveform`은 30초 비중첩 창마다 ECAPA, 활성화됐으면 WeSpeaker를 뽑고 모델별로
+평균해 파형당 벡터 하나를 만든다. `embed_wespeaker`는 군집화가 이미 만든 ECAPA를 다시
+계산하지 않을 때 쓴다. `_windows`는 끝 창이 0.5초 미만이면 버린다. 빈 샘플은 오류다.
 
-`load_enrollments`는 호출자가 이미 `hub.lock`을 잡고 있다고 가정하고 락을 다시 잡지 않는다.
-`RLock`이라 잡아도 교착은 아니지만, 문서화된 계약은 호출자 보유다. `match_file`이 그 호출자다.
-`force=False`다.
+`_fingerprint`는 정렬된 wav의 `name:size:mtime_ns`를 줄바꿈으로 잇고 sha256을 만든다.
+`_cache_path`는 `cache/enroll/{speaker_id}.npz`다. `_read_cache`는 지문 또는 개별 참조
+배열이 없거나, 앙상블에서 WeSpeaker 배열이 부족하면 미스로 처리한다. 손상된 npz는 예외를
+한 줄 로그로 남기고 미스로 처리한다. 비앙상블 조회는 저장된 WeSpeaker를 무시한다.
+`_write_cache`는 평균과 개별 참조를 float32로 저장한다. WeSpeaker가 없으면 길이 0 배열이다.
 
-`embed_waveform`은 ECAPA를 항상 만들고, `ensemble`일 때만 WeSpeaker를 만든다.
-`embed_wespeaker`(모듈 함수)는 WeSpeaker만 만든다. 군집화 경로가 ECAPA를 두 번 계산하지
-않게 `pipeline`이 이쪽을 부른다. 빈 샘플은 `RuntimeError`다.
+`_embed_or_cache`는 캐시 미스 또는 `force`일 때만 `_average_wavs`를 호출한다.
+`_average_wavs`는 각 wav를 임시 PCM16으로 변환한 뒤 `ReferenceEmbedding` 하나씩 만든다.
+평균 참조는 각 wav의 정규화 임베딩을 동일 가중 평균한다. ffmpeg 없음은 500, 디코드 실패는
+400 `cannot read media: {파일명}`이다. 임시 추출 디렉터리는 `finally`에서 지운다.
 
-`_windows`는 위 「30초 창」을 본다.
-
-`_fingerprint`는 `name:size:mtime_ns`를 정렬된 입력 순서 그대로 줄바꿈으로 잇고 sha256 hex다.
-`_reference_wavs`가 이미 이름순이므로 순서는 성우 디렉터리 안에서 안정적이다.
-
-`_cache_path`는 `cache/enroll/{speaker_id}.npz`다.
-`_read_cache`는 지문 문자열 불일치, 앙상블인데 벡터 길이가 0, 파일 손상(`exception` 로그)이면
-None이다. 앙상블이 꺼져 있으면 저장된 WeSpeaker를 None으로 무시한다.
-`_write_cache`는 float32로 저장하고, WeSpeaker가 없으면 길이 0 float32다.
-지문은 `np.array(fingerprint)` 0차원 유니코드이고 읽을 때 `str(...)`로 비교한다.
-
-`_embed_or_cache`는 캐시 미스거나 `force`일 때만 `_average_wavs`를 호출한다.
-`_average_wavs`는 각 wav를 `work/{index:03d}.wav`로 추출한 뒤 `embed_waveform`하고,
-wav들의 ECAPA(와 있으면 WeSpeaker)를 다시 평균한다. ffmpeg 없음은 500, 디코드 실패는
-400 `cannot read media: {파일명}`이다. 추출 디렉터리는 함수 `finally`에서 지운다.
-한 wav라도 WeSpeaker가 None이면 그 벡터는 평균에 빠지고, 전부 빠지면 enrollment.wespeaker는
-None이다. `ensemble=True`인데 모델이 없으면 `embed_wespeaker`가 예외를 내므로 부분 None은
-`ensemble=False`로 호출된 경우다.
-
-`_replace_references`는 `refs/.{id}.staging`에 복사하고, 기존 디렉터리를 `refs/.{id}.bak`으로
-옮긴 다음 staging을 최종 이름으로 rename한다. 성공하면 bak을 지운다. 예외 시 dest가 없고 bak이
-있으면 bak을 dest로 되돌린다. staging이 남아 있으면 지운다.
+`_replace_references`는 `refs/.{id}.staging`에 복사하고 기존 디렉터리를 `.bak`으로 옮긴 다음
+staging을 최종 이름으로 바꾼다. 예외 시 이전 디렉터리를 복원하고 staging을 정리한다.
 
 ### app/pipeline.py
 **역할**: 쿼리 파일 하나의 매치. HTTP를 모른다.
 
-`match_file`의 단계와 락 범위는 「파이프라인」을 본다. 추출 실패의 `FFmpegMissing`은 500,
-`AudioReadError`는 400이다. 분리 실패는 잡고 원본으로 계속한다. vocal wav를 다시 읽다 실패하면 400이다.
+`match_file`은 ffmpeg 추출을 락 밖에서 수행하고, 분리·VAD·화자 분리·임베딩·등록 캐시 조회와
+`decide_references`를 락 안에서 수행한다. 추출 실패의 `FFmpegMissing`은 500,
+`AudioReadError`는 400이다. 분리 실패는 로그 후 원본 믹스로 계속한다. 읽기 실패는 400이다.
 
-무음이면 `_payload(..., reason="no_speech")`. 구간이 있는데 `_speaker_segments`가 빈 리스트를
-주면 역시 `no_speech`다. 이때 `diarization`은 시도한 쪽 이름이다.
+무음이거나 `_speaker_segments` 결과가 비면 `reason=no_speech`다. `use_ensemble`은 두 모델이
+실제로 로드되고 모든 등록 성우의 모든 참조에 WeSpeaker 벡터가 있을 때만 true다. 아니면 요청
+전체를 ECAPA로만 판정한다.
 
-`use_ensemble`은 `hub.ensemble()`이 true이고 로드된 모든 등록 벡터에 WeSpeaker가 있을 때다.
-한 명이라도 없으면 그 요청은 ECAPA만으로 `decide`한다.
+`_separate_vocals`는 Demucs vocals를 채널 평균하고 필요하면 16 kHz로 리샘플해 PCM16으로 쓴다.
+모델 샘플레이트는 `samplerate` 또는 `_samplerate` 속성이다. 오류는 호출부의 원본 폴백으로 간다.
 
-`_separate_vocals`는 `Separator.separate_audio_file`의 vocals를 채널 평균하고, 샘플레이트가
-16 kHz가 아니면 torchaudio로 리샘플한 뒤 PCM16으로 쓴다. 샘플레이트는 `samplerate` 속성이
-없으면 `_samplerate`다. vocals가 텐서가 아니어서 `detach`가 없으면 예외가 나고 호출부가
-원본 믹스로 폴백한다.
-
-`_speaker_segments`는 pyannote 분기가 라벨 있는 구간을 반환할 때, unassigned 구간도 함께
-돌려준다. 커버되지 않은 3초 이상을 버리지 않기 위해서다. 군집화 분기는 구간마다 ECAPA를 먼저
-뽑아 `cluster_labels`에 넣고, 앙상블일 때만 같은 슬라이스를 WeSpeaker에 다시 넣는다.
-슬라이스가 빈 구간은 군집화 입력에서 빠진다.
-
-`_pyannote_turns`는 출력에 `speaker_diarization`이 있으면 그것을, 없으면 출력 자체를
-Annotation으로 보고 `itertracks(yield_label=True)`한다. pyannote 3.x Annotation과 4.x에 가까운
-래퍼를 같이 받기 위한 분기지만, 의존성은 `pyannote.audio>=3.1.1,<4`다.
-
-`_segment`는 빈 슬라이스면 None이다. 아니면 `embed_waveform` 한 번으로 두 벡터를 만든다.
-`_clusters`는 라벨 문자열이 키다. 등장 순서를 유지한다.
-`_payload`는 `best`와 `reason`이 비면 키를 뺀다. `segments`는 항상 넣는다.
+`_speaker_segments`는 pyannote 라벨이 유효하면 unassigned를 포함한 구간을 돌려주고, 쓸
+라벨이 없으면 ECAPA 군집화로 간다. 군집화는 구간의 ECAPA를 뽑아 라벨을 만들고 같은 파형
+슬라이스에서 활성화된 WeSpeaker만 추가한다. 빈 슬라이스는 버린다.
+`_pyannote_turns`는 `speaker_diarization`이 있으면 그 Annotation을, 없으면 출력 자체를
+`itertracks(yield_label=True)`로 읽는다. `_segment`는 한 구간의 두 임베딩을 만든다.
+`_clusters`는 라벨별 구간을 등장 순서로 묶는다. `_payload`는 `best`와 `reason`이 없으면
+키를 빼고 `segments`는 항상 넣는다.
 
 ### app/shared_secret.py
 **역할**: ImageAnalyzer 및 OCR 브로커와 같은 `OCR_BROKER_SECRET`을 공유한다. 별도 인증 키 이름을 만들지 않는다.

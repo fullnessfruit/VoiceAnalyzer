@@ -1,6 +1,6 @@
-"""Average reference wavs into one embedding per speaker and cache it.
+"""Cache individual reference embeddings and their legacy mean for comparison.
 
-Nothing here is trained. POST /v1/enroll only rebuilds that average.
+Nothing here is trained. POST /v1/enroll rebuilds the cached vectors.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from app.audio import AudioReadError, FFmpegMissing, extract_mono, read_mono_pcm
 from app.config import Config
 from app.models import ModelHub
 from app.paths import PathRejected
-from app.scoring import Enrollment, average_embeddings
+from app.scoring import Enrollment, ReferenceEmbedding, average_embeddings
 
 logger = logging.getLogger("voiceanalyzer")
 
@@ -170,32 +170,59 @@ def _read_cache(path: Path, fingerprint: str, ensemble: bool) -> Enrollment | No
         return None
     try:
         with np.load(path, allow_pickle=False) as data:
-            stored = str(data["fingerprint"])
-            if stored != fingerprint:
+            required = {"fingerprint", "ecapa", "wespeaker", "reference_names", "reference_ecapa", "reference_wespeaker"}
+            if not required.issubset(data.files) or str(data["fingerprint"]) != fingerprint:
                 return None
-            wespeaker = np.asarray(data["wespeaker"], dtype=np.float64)
-            if ensemble and wespeaker.size == 0:
+            names = [str(name) for name in data["reference_names"]]
+            ecapa_refs = np.asarray(data["reference_ecapa"], dtype=np.float64)
+            wespeaker_refs = np.asarray(data["reference_wespeaker"], dtype=np.float64)
+            if not names or ecapa_refs.ndim != 2 or ecapa_refs.shape[0] != len(names):
                 return None
+            if ensemble and (wespeaker_refs.ndim != 2 or wespeaker_refs.shape[0] != len(names)):
+                return None
+            references = tuple(
+                ReferenceEmbedding(
+                    name,
+                    ecapa_refs[index],
+                    wespeaker_refs[index] if ensemble else None,
+                )
+                for index, name in enumerate(names)
+            )
             return Enrollment(
                 ecapa=np.asarray(data["ecapa"], dtype=np.float64),
-                wespeaker=None if wespeaker.size == 0 else wespeaker,
+                wespeaker=np.asarray(data["wespeaker"], dtype=np.float64) if ensemble else None,
+                references=references,
             )
-    except Exception:
-        logger.exception("ignoring unreadable enrollment cache %s", path)
+    except Exception as exc:
+        logger.error("ignoring unreadable enrollment cache %s - error=%r", path, exc)
         return None
 
 
 def _write_cache(path: Path, fingerprint: str, enrollment: Enrollment) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    references = enrollment.references
+    if not references:
+        raise ValueError("cannot cache enrollment without references")
+    with_wespeaker = [reference.wespeaker is not None for reference in references]
+    if any(with_wespeaker) and not all(with_wespeaker):
+        raise ValueError("inconsistent wespeaker reference embeddings")
     wespeaker = (
         np.zeros(0, dtype=np.float32)
         if enrollment.wespeaker is None
         else np.asarray(enrollment.wespeaker, dtype=np.float32)
     )
+    reference_wespeaker = (
+        np.stack([np.asarray(reference.wespeaker, dtype=np.float32) for reference in references])
+        if all(with_wespeaker)
+        else np.zeros(0, dtype=np.float32)
+    )
     np.savez(
         path,
         ecapa=np.asarray(enrollment.ecapa, dtype=np.float32),
         wespeaker=wespeaker,
+        reference_names=np.asarray([reference.name for reference in references]),
+        reference_ecapa=np.stack([np.asarray(reference.ecapa, dtype=np.float32) for reference in references]),
+        reference_wespeaker=reference_wespeaker,
         fingerprint=np.array(fingerprint),
     )
 
@@ -228,8 +255,7 @@ def _average_wavs(
     ensemble: bool,
 ) -> Enrollment:
     work.mkdir(parents=True, exist_ok=True)
-    ecapa_vectors = []
-    wespeaker_vectors = []
+    references: list[ReferenceEmbedding] = []
     try:
         for index, wav in enumerate(wavs):
             dest = work / f"{index:03d}.wav"
@@ -241,14 +267,16 @@ def _average_wavs(
             except AudioReadError as exc:
                 raise PathRejected(400, f"cannot read media: {wav.name}") from exc
             ecapa, wespeaker = embed_waveform(hub, samples, sample_rate, ensemble)
-            ecapa_vectors.append(ecapa)
-            if wespeaker is not None:
-                wespeaker_vectors.append(wespeaker)
+            references.append(ReferenceEmbedding(wav.name, ecapa, wespeaker))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return Enrollment(
-        ecapa=average_embeddings(ecapa_vectors),
-        wespeaker=average_embeddings(wespeaker_vectors) if wespeaker_vectors else None,
+        ecapa=average_embeddings([reference.ecapa for reference in references]),
+        wespeaker=(
+            average_embeddings([reference.wespeaker for reference in references])
+            if ensemble else None
+        ),
+        references=tuple(references),
     )
 
 

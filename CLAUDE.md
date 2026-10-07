@@ -38,27 +38,29 @@ separation, VAD, diarization, embedding, and enrollment cache reads. `ModelHub` 
 loads each network once per process. The lock is an `RLock` because request code and the embed
 methods both acquire it.
 
-Enrollment lives in `refs/{speaker_id}/*.wav`. The stored vector is the mean of those wavs.
-`POST /v1/enroll` rebuilds `cache/enroll/{speaker_id}.npz`. Nothing is trained.
+Enrollment lives in `refs/{speaker_id}/*.wav`. Each wav has a separate cached embedding pair;
+a mean is retained only for comparisons with the old method. `POST /v1/enroll` rebuilds
+`cache/enroll/{speaker_id}.npz`. Nothing is trained.
 Query media must resolve under `data/`. `work/` holds per-request temp files and is deleted when
 the request ends.
 
-`app/scoring.py:decide` is pure numpy. A cluster is a candidate only when every active model is
-at or above its own threshold. With two or more enrolled speakers the target must also lead every
-other enrollment by `margin` on each active model. One enrolled speaker skips the margin.
-Tests call `decide` with fake vectors and do not load models.
+`app/scoring.py:decide_references` is the pure numpy production decision. It compares each speaker
+cluster with each wav of the requested actor and requires the same wav to pass every active model.
+With multiple enrolled speakers, the candidate must also lead the strongest reference of each other
+speaker by `margin` on each active model. The old single-mean `decide` remains for baseline
+comparisons and fake-vector tests.
 
 ## Layout
 - `app/main.py`: routes and HTTP error mapping
 - `app/pipeline.py`: match orchestration
 - `app/scoring.py`: cosine decision
 - `app/diarize.py`: VAD regions, pyannote intersection, ECAPA clustering
-- `app/enroll.py`: reference means and the npz cache
+- `app/enroll.py`: individual reference embeddings, comparison mean, and npz cache
 - `app/models.py`: process-wide loaders
 - `app/audio.py`: ffmpeg and PCM wav helpers
 - `app/paths.py`: `data/` confinement, 2 GiB, 3 hours
 - `app/config.py`: `config.yaml` plus the hard limits
-- `app/schemas.py`: request and response bodies
+- `app/schemas.py`: request bodies
 - `config.yaml`: thresholds, cluster distance, demucs, model ids, device
 - `tests/test_match.py`: decision and 403 only
 - `install.bat` / `install.sh`: create or reuse `.venv` and install `requirements.txt`
@@ -69,7 +71,7 @@ Tests call `decide` with fake vectors and do not load models.
 - Read `TODO.md` before starting work. Its usage section is the source of truth. Do not copy that
   section into `Document.md`.
 - After code changes, update `Document.md` to the current code. Delete statements that are no longer true.
-- Reuse `embed_waveform`, `resolve_media_path`, `decide`, and `average_embeddings` instead of
+- Reuse `embed_waveform`, `resolve_media_path`, `decide_references`, and `average_embeddings` instead of
   duplicating them.
 - One log event is one line on logger `voiceanalyzer`.
 - Do not add an ASR, TTS, conversion, codec, vocoder, or LLM step to the decision.

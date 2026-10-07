@@ -84,8 +84,8 @@ class ModelHub:
             if self._pyannote is None:
                 try:
                     self._pyannote = self._load_pyannote()
-                except Exception:
-                    logger.exception("pyannote load failed; speaker grouping will use clustering")
+                except Exception as exc:
+                    logger.error("pyannote load failed; using clustering - error=%r", exc)
                     self._pyannote_failed = True
                     return None
             return self._pyannote
@@ -129,9 +129,9 @@ class ModelHub:
             # Enrollment and match already cut speech. Leave the library VAD off.
             model.set_vad(False)
             self._wespeaker = model
-        except (Exception, SystemExit):
+        except (Exception, SystemExit) as exc:
             # The wespeaker hub calls sys.exit on an unknown model name.
-            logger.exception("wespeaker load failed; matching will use ECAPA only")
+            logger.error("wespeaker load failed; using ECAPA only - error=%r", exc)
             self._wespeaker_failed = True
             self._wespeaker = None
         return self._wespeaker
@@ -193,8 +193,8 @@ class ModelHub:
             raise RuntimeError("pyannote pipeline failed to load")
         try:
             pipeline.to(torch.device(self.device()))
-        except Exception:
-            logger.exception("pyannote stayed on CPU")
+        except Exception as exc:
+            logger.error("pyannote stayed on CPU - error=%r", exc)
         return pipeline
 
 
