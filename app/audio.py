@@ -108,11 +108,3 @@ def read_mono_pcm16(path: Path) -> tuple[np.ndarray, int]:
     if channels > 1:
         data = data.reshape(-1, channels).mean(axis=1)
     return np.ascontiguousarray(data), sample_rate
-
-
-def slice_audio(samples: np.ndarray, sample_rate: int, start: float, end: float) -> np.ndarray:
-    begin = max(0, int(round(start * sample_rate)))
-    stop = min(len(samples), int(round(end * sample_rate)))
-    if stop <= begin:
-        return np.zeros(0, dtype=np.float32)
-    return np.ascontiguousarray(samples[begin:stop])

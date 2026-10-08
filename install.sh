@@ -7,11 +7,6 @@ set -e
 
 echo "=== VoiceAnalyzer Install ==="
 
-if ! command -v git >/dev/null 2>&1; then
-  echo "git is required. wespeaker is installed from git+https://github.com/wenet-e2e/wespeaker.git" >&2
-  exit 1
-fi
-
 # Print one interpreter name. Prefer 3.11, then 3.10, then python3, then python.
 pick_python() {
   for c in python3.11 python3.10 python3 python; do
@@ -96,7 +91,6 @@ echo ""
 echo "Next:"
 echo "  1. Put reference wavs in refs/<speaker_id>/"
 echo "  2. Put the media to search under data/"
-echo "  3. Optional: set HUGGINGFACE_TOKEN for pyannote diarization"
-echo "  4. Start the server with ./server.sh"
+echo "  3. Start the server with ./server.sh"
 echo ""
 echo "Model weights are downloaded on first use. This script does not fetch them."

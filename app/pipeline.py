@@ -1,4 +1,4 @@
-"""Match one local media file against enrolled speakers."""
+"""Find a registered actor in one local file using voiced 3-second windows."""
 
 from __future__ import annotations
 
@@ -7,25 +7,22 @@ import shutil
 import uuid
 from pathlib import Path
 
-from app.audio import (
-    AudioReadError,
-    FFmpegMissing,
-    extract_mono,
-    read_mono_pcm16,
-    slice_audio,
-    write_mono_pcm16,
-)
+import numpy as np
+
+from app.audio import (AudioReadError, FFmpegMissing, extract_mono, read_mono_pcm16,
+                       write_mono_pcm16)
 from app.config import Config
-from app.diarize import cluster_labels, label_vad_with_turns, speech_regions_from_vad
-from app.enroll import embed_waveform, embed_wespeaker, load_enrollments
-from app.models import get_hub, huggingface_token
+from app.enroll import load_enrollment
+from app.models import get_hub
 from app.paths import PathRejected
-from app.scoring import SpeechSegment, SpeakerCluster, decide_references
+from app.scoring import WindowEmbedding, decide
+from app.voice_activity import fixed_windows, speech_regions
 
 logger = logging.getLogger("voiceanalyzer")
 
 
 def match_file(config: Config, media: Path, speaker_id: str, separate_bgm: bool) -> dict:
+    """Keep ffmpeg extraction outside the model lock and remove temporary PCM afterward."""
     hub = get_hub(config)
     work = config.work_dir / uuid.uuid4().hex
     work.mkdir(parents=True, exist_ok=True)
@@ -39,9 +36,8 @@ def match_file(config: Config, media: Path, speaker_id: str, separate_bgm: bool)
             raise PathRejected(400, "cannot read media") from exc
 
         with hub.lock:
-            ensemble = hub.ensemble()
-            bgm_separated = False
             vocal_path = extracted
+            bgm_separated = False
             if separate_bgm:
                 vocals = work / "vocals.wav"
                 try:
@@ -50,70 +46,31 @@ def match_file(config: Config, media: Path, speaker_id: str, separate_bgm: bool)
                     bgm_separated = True
                 except Exception as exc:
                     logger.error("demucs failed; using original mix - error=%r", exc)
-                    vocal_path = extracted
-                    bgm_separated = False
-
             try:
-                samples, sample_rate = read_mono_pcm16(vocal_path)
+                samples, rate = read_mono_pcm16(vocal_path)
             except AudioReadError as exc:
                 raise PathRejected(400, "cannot read media") from exc
+            if rate != config.sample_rate:
+                raise PathRejected(400, "unexpected sample rate")
 
-            regions = speech_regions_from_vad(
-                samples,
-                sample_rate,
-                hub.vad(),
-                config.min_speech_sec,
-                config.merge_silence_sec,
-            )
-            planned = "pyannote" if huggingface_token() else "clustering"
+            regions = speech_regions(samples, hub.vad(), config)
             if not regions:
-                return _payload(
-                    speaker_id, ensemble, bgm_separated, planned, False, None, [], "no_speech"
-                )
+                return _payload(config, speaker_id, bgm_separated, 0, False, None, [],
+                                "no_speech")
+            windows = fixed_windows(len(samples), regions, config)
+            if not windows:
+                return _payload(config, speaker_id, bgm_separated, 0, False, None, [],
+                                "insufficient_speech")
 
-            segments, diarization = _speaker_segments(
-                hub, config, vocal_path, samples, sample_rate, regions, ensemble
-            )
-            if not segments:
-                return _payload(
-                    speaker_id,
-                    ensemble,
-                    bgm_separated,
-                    diarization,
-                    False,
-                    None,
-                    [],
-                    "no_speech",
-                )
-
-            clusters = _clusters(segments)
-            enrollments = load_enrollments(config, hub, work / "refs")
-            if speaker_id not in enrollments:
-                raise PathRejected(404, "speaker not enrolled")
-            # A speaker cached before WeSpeaker loaded has no second vector.
-            # load_enrollments rebuilds those, so this is only a guard.
-            use_ensemble = ensemble and all(
-                item.wespeaker is not None
-                and all(reference.wespeaker is not None for reference in item.references)
-                for item in enrollments.values()
-            )
-            decision = decide_references(
-                clusters,
-                enrollments,
-                speaker_id,
-                config.thresholds,
-                use_ensemble,
-            )
-            return _payload(
-                speaker_id,
-                use_ensemble,
-                bgm_separated,
-                diarization,
-                decision.present,
-                decision.best,
-                decision.segments,
-                decision.reason,
-            )
+            enrollment = load_enrollment(config, hub, speaker_id, work / "refs")
+            pieces = [np.ascontiguousarray(samples[first:last]) for first, last, _ in windows]
+            vectors = hub.embed_many(pieces)
+            embedded = [WindowEmbedding(first / rate, last / rate, vector)
+                        for (first, last, _), vector in zip(windows, vectors)]
+            decision = decide(embedded, enrollment, config.cosine_min)
+            reason = None if decision.present else "below_threshold"
+            return _payload(config, speaker_id, bgm_separated, len(windows),
+                            decision.present, decision.best, decision.segments, reason)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -128,90 +85,21 @@ def _separate_vocals(hub, source: Path, dest: Path, sample_rate: int) -> None:
     vocals = stems["vocals"]
     if vocals.shape[0] > 1:
         vocals = vocals.mean(dim=0, keepdim=True)
-    model_rate = int(getattr(separator, "samplerate", separator._samplerate))
+    model_rate = int(separator.samplerate)
     vocals = vocals.detach().cpu()
     if model_rate != sample_rate:
         vocals = torchaudio.transforms.Resample(model_rate, sample_rate)(vocals)
     write_mono_pcm16(dest, vocals.squeeze(0).numpy(), sample_rate)
 
 
-def _speaker_segments(hub, config, vocal_path, samples, sample_rate, regions, ensemble):
-    pipeline = hub.pyannote()
-    if pipeline is not None:
-        try:
-            turns = _pyannote_turns(pipeline, vocal_path)
-            labeled = label_vad_with_turns(
-                regions,
-                turns,
-                config.min_speech_sec,
-                config.merge_silence_sec,
-            )
-            segments = [
-                (label, _segment(hub, samples, sample_rate, start, end, ensemble))
-                for start, end, label in labeled
-            ]
-            segments = [(label, segment) for label, segment in segments if segment is not None]
-            labeled_by_pyannote = [
-                item for item in segments if not item[0].startswith("unassigned-")
-            ]
-            if labeled_by_pyannote:
-                return segments, "pyannote"
-            logger.warning("pyannote produced no usable speaker segment; using clustering")
-        except Exception as exc:
-            logger.error("pyannote diarization failed; using clustering - error=%r", exc)
-
-    embedded = []
-    for start, end in regions:
-        piece = slice_audio(samples, sample_rate, start, end)
-        if len(piece) == 0:
-            continue
-        ecapa, _wespeaker = embed_waveform(hub, piece, sample_rate, ensemble=False)
-        embedded.append((start, end, piece, ecapa))
-    if not embedded:
-        return [], "clustering"
-    labels = cluster_labels([item[3] for item in embedded], config.cluster_distance)
-    segments = []
-    for (start, end, piece, ecapa), label in zip(embedded, labels):
-        wespeaker = embed_wespeaker(hub, piece, sample_rate) if ensemble else None
-        segments.append((label, SpeechSegment(start, end, ecapa, wespeaker)))
-    return segments, "clustering"
-
-
-def _pyannote_turns(pipeline, vocal_path: Path) -> list[tuple[float, float, str]]:
-    output = pipeline(str(vocal_path))
-    annotation = getattr(output, "speaker_diarization", output)
-    turns = []
-    for turn, _, speaker in annotation.itertracks(yield_label=True):
-        turns.append((float(turn.start), float(turn.end), str(speaker)))
-    return turns
-
-
-def _segment(hub, samples, sample_rate, start, end, ensemble):
-    piece = slice_audio(samples, sample_rate, start, end)
-    if len(piece) == 0:
-        return None
-    ecapa, wespeaker = embed_waveform(hub, piece, sample_rate, ensemble)
-    return SpeechSegment(start, end, ecapa, wespeaker)
-
-
-def _clusters(segments: list[tuple[str, SpeechSegment]]) -> list[SpeakerCluster]:
-    grouped: dict[str, SpeakerCluster] = {}
-    for label, segment in segments:
-        grouped.setdefault(label, SpeakerCluster(label)).segments.append(segment)
-    return list(grouped.values())
-
-
-def _payload(speaker_id, ensemble, bgm_separated, diarization, present, best, segments, reason):
-    body = {
-        "present": present,
-        "speaker_id": speaker_id,
-        "ensemble": ensemble,
-        "bgm_separated": bgm_separated,
-        "diarization": diarization,
-        "segments": segments,
-    }
+def _payload(config: Config, speaker_id: str, bgm_separated: bool, window_count: int,
+             present: bool, best: dict | None, segments: list[dict], reason: str | None) -> dict:
+    body = {"present": present, "speaker_id": speaker_id, "model": "anime_va",
+            "threshold": config.cosine_min, "window_seconds": config.window_sec,
+            "speech_window_count": window_count, "bgm_separated": bgm_separated,
+            "diarization": "none", "ensemble": False, "segments": segments}
     if best is not None:
         body["best"] = best
-    if reason:
+    if reason is not None:
         body["reason"] = reason
     return body

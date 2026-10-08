@@ -17,7 +17,7 @@ def _speaker_id(value: str) -> str:
 class MatchRequest(BaseModel):
     file_path: str = Field(min_length=1)
     speaker_id: str = Field(min_length=1, max_length=128)
-    separate_bgm: bool = True
+    separate_bgm: bool = False
 
     @field_validator("speaker_id")
     @classmethod

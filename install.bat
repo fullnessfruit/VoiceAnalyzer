@@ -8,9 +8,6 @@ set "PYFILE=%TEMP%\voiceanalyzer-python.txt"
 
 echo === VoiceAnalyzer Install ===
 
-git --version >nul 2>&1
-if errorlevel 1 goto :no_git
-
 if exist ".venv\Scripts\python.exe" goto :use_existing
 
 call :find_python
@@ -64,8 +61,7 @@ echo.
 echo Next:
 echo   1. Put reference wavs in refs\{speaker_id}\
 echo   2. Put the media to search under data\
-echo   3. Optional: set HUGGINGFACE_TOKEN for pyannote diarization
-echo   4. Start the server with server.bat
+echo   3. Start the server with server.bat
 echo.
 echo Model weights are downloaded on first use. This script does not fetch them.
 goto :eof
@@ -106,10 +102,6 @@ for /f "usebackq delims=" %%I in ("%PYFILE%") do set "PY=%%I"
 if exist "%PYFILE%" del "%PYFILE%" >nul 2>&1
 if not defined PY exit /b 1
 exit /b 0
-
-:no_git
-echo git is required. wespeaker is installed from git+https://github.com/wenet-e2e/wespeaker.git
-exit /b 1
 
 :no_python
 echo Python 3.10 or newer was not found. Install Python 3.11 and run this script again.

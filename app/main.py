@@ -23,7 +23,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     secret = require_secret()
     booted_at_ms = int(time.time() * 1000)
     settings = config or load_config()
-    app = FastAPI(title="VoiceAnalyzer", version="1.0.0")
+    app = FastAPI(title="VoiceAnalyzer", version="2.0.0")
     app.state.config = settings
     app.add_middleware(OcrAuthMiddleware, secret=secret, booted_at_ms=booted_at_ms)
 
