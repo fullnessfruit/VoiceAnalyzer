@@ -30,6 +30,7 @@ class Config:
     refs_dir: Path
     work_dir: Path
     cache_dir: Path
+    log_dir: Path
     cosine_min: float
     device: str
     demucs_model: str
@@ -66,11 +67,13 @@ def load_config(path: Path | None = None) -> Config:
         refs_dir=(root / "refs").resolve(),
         work_dir=(root / "work").resolve(),
         cache_dir=(root / "cache").resolve(),
+        log_dir=(root / "log").resolve(),
         cosine_min=cosine_min,
         device=str(raw.get("device", "auto")),
         demucs_model=str(demucs.get("model", "htdemucs_ft")),
         demucs_shifts=int(demucs.get("shifts", 0)),
     )
-    for directory in (config.data_dir, config.refs_dir, config.work_dir, config.cache_dir):
+    for directory in (config.data_dir, config.refs_dir, config.work_dir,
+                      config.cache_dir, config.log_dir):
         directory.mkdir(parents=True, exist_ok=True)
     return config

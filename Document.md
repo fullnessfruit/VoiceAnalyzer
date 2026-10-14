@@ -40,6 +40,7 @@
 결과는 법적 동일인 확인이나 화자 신원 확률이 아니다. `uvicorn app.main:app`으로 기동하고
 AnnouncementAggregator의 수동 Node 클라이언트와 OCR1 인증을 공유한다. ASR, 대사 전사, TTS,
 목소리 변환, LLM은 판정에 호출하지 않는다. URL 다운로드, 자동 확장 분석, Discord 전송도 없다.
+원본 게시물·영상 URL은 분석할 로컬 파일과 별도로 요청 메타데이터로만 받는다.
 
 ## 판정과 전처리 결정
 
@@ -88,17 +89,21 @@ AnnouncementAggregator의 수동 Node 클라이언트와 OCR1 인증을 공유�
 
 ## 요청 경로와 잠금
 
-`POST /v1/match`: `main._accept_media`가 `data/` 경로·크기·길이를 먼저 확인한 뒤
+`POST /match`: `main._accept_media`가 `data/` 경로·크기·길이를 먼저 확인한 뒤
 `speaker_has_wavs`가 등록 여부를 본다. `pipeline.match_file`이 작업 UUID 아래 PCM을 만들고
 `ModelHub.lock` 안에서 선택적 분리, VAD, 참조 캐시, 임베딩, 점수 판정을 수행한다. ffmpeg
 추출은 락 밖이다. `finally`가 UUID 작업 디렉터리를 지운다. FastAPI는 동기 추론을
 `run_in_threadpool`에서 실행한다. `PathRejected`만 명시적 HTTP 상태로 옮기며 나머지 예외는
 서버 실패다. 질의 파일이 디코딩되지 않으면 400이고 `present:false`로 바꾸지 않는다.
+라우트에 들어온 요청은 분석 전에 `match_started`, 성공·실패 뒤 `match_finished`를
+`log/`에 한 줄씩 기록한다. 동일한 `request_id`와 원본 URL·파일 경로·대상 성우로 두 행을
+연결한다. URL은 호출자가 `source_url`로 명시한 것만 쓰며 경로나 파일명에서 유추하지 않는다.
+본문 검증·OCR1 인증에서 거절된 요청은 라우트에 도달하지 않아 이 로그의 범위 밖이다.
 
-`POST /v1/enroll`: 본문 없음·빈 객체면 WAV가 있는 모든 성우를 다시 계산한다. `speaker_id`
+`POST /enroll`: 본문 없음·빈 객체면 WAV가 있는 모든 성우를 다시 계산한다. `speaker_id`
 하나면 해당 성우만 재계산한다. `file_paths`는 `data/` 안의 WAV 경로를 검증하고 명시적으로
 그 성우의 `refs/`를 교체한 뒤 새 캐시를 만든다. 등록 참조의 ffmpeg와 임베딩은 모델 락
-안이다. `GET /health`는 모델을 열지 않고, `GET /v1/speakers`는 WAV 수만 센다.
+안이다. `GET /health`는 모델을 열지 않고, `GET /speakers`는 WAV 수만 센다.
 
 ## 파일별 상세
 
@@ -111,9 +116,9 @@ pyannote를 직접 설치하거나 scikit-learn 군집화 API를 호출하지 �
 
 ### `app/config.py`
 
-`Config`는 frozen dataclass로 루트와 4개 저장 디렉터리, 코사인 임계값, 장치, Demucs 설정,
+`Config`는 frozen dataclass로 루트와 5개 저장 디렉터리, 코사인 임계값, 장치, Demucs 설정,
 고정 오디오 상수를 담는다. `load_config(path=None)`는 YAML의 부모를 루트로 삼아
-`data/`, `refs/`, `work/`, `cache/`를 만든다. 테스트가 임시 YAML을 주면 그 부모에만 만든다.
+`data/`, `refs/`, `work/`, `cache/`, `log/`를 만든다. 테스트가 임시 YAML을 주면 그 부모에만 만든다.
 YAML 루트와 하위 `thresholds`/`demucs`가 mapping인지 검증하고 임계값은 [-1,1]로 제한한다.
 옛 임계값 키는 무시하며 이름만 기록하는 한 줄 경고를 낸다. 모델 ID·윈도 길이는 YAML로
 바뀌지 않아 측정한 처리 조건이 유지된다.
@@ -121,9 +126,20 @@ YAML 루트와 하위 `thresholds`/`demucs`가 mapping인지 검증하고 임계
 ### `app/schemas.py`
 
 `_speaker_id`는 공백·끝 점·Windows 금지 문자·제어 문자를 거절해 refs 경로와 캐시 파일명을
-안전하게 만든다. 한글은 허용한다. `MatchRequest`는 파일 경로, 등록 ID, `separate_bgm`을
-받으며 분리 기본값은 false다. `EnrollRequest`의 ID·경로 목록은 선택이므로 빈 POST는
+안전하게 만든다. 한글은 허용한다. `MatchRequest`는 파일 경로, 등록 ID, `separate_bgm`,
+선택적 `source_url`을 받으며 분리 기본값은 false다. `check_source_url`은 HTTP(S) URL,
+호스트 존재, 자격증명 없음, 공백·제어문자 없음, 최대 4096자를 검사하고 원문 문자열을 보존한다.
+URL은 판정 입력이 아니라 원본을 추적하는 메타데이터다. `EnrollRequest`의 ID·경로 목록은 선택이므로 빈 POST는
 전체 재계산을 뜻한다. 점수 판정이나 모델 로드는 이 파일에 없다.
+
+### `app/match_log.py`
+
+`MatchAuditLog`는 앱 인스턴스 시작 UTC 시각과 무작위 접미사로 고유한
+`log/match-log_<UTC>-<id>.log` 파일을 정한다. `record`는 매번 UTC 밀리초 ISO 시각을
+`[...Z]`로 행 앞에 쓰고 JSON을 한 줄로 직렬화한다. 줄바꿈은 JSON escape가 맡으며
+프로세스 안의 동시 요청은 `Lock`으로 append를 직렬화한다. 기록할 때마다 파일을 닫아
+중간 종료 시에도 완료된 행을 남긴다. AnnouncementAggregator의 로그와 마찬가지로
+파일명과 행 시각 모두 UTC이며, 로컬 시간대로 변환하지 않는다.
 
 ### `app/audio.py`
 
@@ -220,8 +236,13 @@ timestamp, nonce 재사용, 1 MiB 본문 한도를 라우팅 전에 확인한다
 ### `app/main.py`
 
 `create_app`은 `require_secret`을 먼저 확인하고 설정·라우트를 닫아 캡처한다.
-`/health`는 모델 로드 없는 상태 응답, `/v1/speakers`는 등록 목록, `/v1/match`는
-`_accept_media` 다음에 등록 WAV를 검사한다. `/v1/enroll`은 `_accept_enrollment_wavs`
+`/health`는 모델 로드 없는 상태 응답, `/speakers`는 등록 목록, `/match`는
+`_accept_media` 다음에 등록 WAV를 검사한다. 매치 라우트는 검증된 본문을 받으면 즉시
+`match_started`를 기록하고, 성공에는 `present`·사유·유효 창 수·최고 창, HTTP 오류에는
+상태·detail, 그 외 예외에는 500·예외 종류를 `match_finished`로 기록한다. 양쪽 모두
+요청 ID·명시된 원본 URL·로컬 경로·찾는 성우를 반복해 한 행만 검색해도 출처가 보인다.
+처리 시간은 단조 시계로 잰다. 로그 작성 자체가 실패하면 조용히 분석을 계속하지 않는다.
+`/enroll`은 `_accept_enrollment_wavs`
 검증 뒤 `get_hub`와 스레드풀을 쓴다. `_accept_media`와 `_call`은 `PathRejected`만
 HTTPException으로 바꾼다. `_accept_enrollment_wavs`는 빈 목록과 비WAV·데이터 밖 경로를
 거절한다. 모듈 하단 `app=create_app()`가 uvicorn 진입점이다.
@@ -241,5 +262,5 @@ uvicorn을 `127.0.0.1:8000`에 띄우며 `HOST`/`PORT`가 있으면 따른다.
 Python으로 새 환경을 만들고 pip 의존성을 설치한다. 3.10 미만은 거절, 3.12 이상은
 경고한다. ffmpeg/ffprobe 부재는 설치 경고다. 가중치는 받지 않고 마지막에 공유 키만
 준비한다. 더는 WeSpeaker용 Git 설치가 필요 없다.
-`uninstall.bat`/`uninstall.sh`는 링크가 아닌 `.venv`만 지우며 참조·미디어·캐시·공유 키를
+`uninstall.bat`/`uninstall.sh`는 링크가 아닌 `.venv`만 지우며 참조·미디어·캐시·로그·공유 키를
 남긴다. `delete-shared-secret.bat`/`.sh`는 명시적으로 공유 키만 지운다.

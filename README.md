@@ -24,7 +24,7 @@ shared key. It reads an explicit process environment value first, then the Windo
 or the shared POSIX auth file. Installation reuses an existing key; it does not rotate it.
 
 `uninstall.bat` or `./uninstall.sh` removes only `.venv`. It preserves source, `config.yaml`,
-`refs/`, `data/`, caches, and the shared key. The separate `delete-shared-secret.bat` and
+`refs/`, `data/`, caches, logs, and the shared key. The separate `delete-shared-secret.bat` and
 `delete-shared-secret.sh` are the explicit key-removal tools.
 
 ## Register voices
@@ -36,9 +36,9 @@ nonoverlapping 30-second chunks. The reference used for detection is the normali
 mean of those WAV embeddings. The cache is under `cache/enroll_anime_va_v1/` and is invalidated by
 changes to WAV contents or model identity. Older ECAPA/WeSpeaker caches are left untouched.
 
-An authenticated `POST /v1/enroll` with `{}` rebuilds all actors. With
+An authenticated `POST /enroll` with `{}` rebuilds all actors. With
 `{"speaker_id":"actor"}` it rebuilds one. With `file_paths`, it explicitly replaces that actor's
-reference WAVs from files under `data/` before rebuilding. `GET /v1/speakers` lists actors with
+reference WAVs from files under `data/` before rebuilding. `GET /speakers` lists actors with
 at least one WAV.
 
 ## Match a file
@@ -46,8 +46,13 @@ at least one WAV.
 The caller places the media under `data/` and sends an authenticated request:
 
 ```json
-{"file_path":"data/clips/scene.mp4","speaker_id":"actor","separate_bgm":false}
+{"file_path":"data/clips/scene.mp4","speaker_id":"actor","source_url":"https://x.com/example/status/123","separate_bgm":false}
 ```
+
+`source_url` is optional provenance for the original post or video. It must be an HTTP(S) URL
+without embedded credentials. The server still analyzes `file_path` and does not fetch the URL.
+Existing callers can omit the field; those requests record `source_url: null`. The manual
+AnnouncementAggregator CLI forwards it with `match --source-url <original-post-or-video-URL>`.
 
 The server extracts 16 kHz mono PCM with ffmpeg. Silero VAD finds speech with a 250 ms minimum and
 no padding. Starting at the beginning of the file, it takes nonoverlapping three-second windows,
@@ -91,6 +96,13 @@ Discord delivery.
 Media outside `data/` is rejected with 403 before speaker lookup. Missing media or speaker WAVs
 return 404. Files larger than 2 GiB or longer than three hours return 400. An audio track that
 cannot be decoded returns 400, not `present: false`.
+
+Each accepted `/match` body creates `match_started` and `match_finished` records in
+`log/match-log_<UTC time>-<id>.log`. The filename timestamp and the `[...Z]` prefix on each
+one-line JSON record use UTC, like AnnouncementAggregator's logs. A shared `request_id` connects
+the two records. Both include the source URL, submitted file path, and sought speaker; the finish
+record adds the HTTP status, elapsed time, and the result or error. A rejected request with an
+invalid body or failed authentication never reaches this log.
 
 ## Configuration and checks
 

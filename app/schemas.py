@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -18,11 +20,27 @@ class MatchRequest(BaseModel):
     file_path: str = Field(min_length=1)
     speaker_id: str = Field(min_length=1, max_length=128)
     separate_bgm: bool = False
+    source_url: str | None = Field(default=None, max_length=4096)
 
     @field_validator("speaker_id")
     @classmethod
     def check_speaker_id(cls, value: str) -> str:
         return _speaker_id(value)
+
+    @field_validator("source_url")
+    @classmethod
+    def check_source_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = urlsplit(value)
+            valid = (parsed.scheme in {"http", "https"} and parsed.hostname is not None
+                     and parsed.username is None and parsed.password is None)
+        except ValueError:
+            valid = False
+        if not valid or any(char.isspace() or ord(char) < 32 for char in value):
+            raise ValueError("source_url must be an HTTP(S) URL without credentials")
+        return value
 
 
 class EnrollRequest(BaseModel):
