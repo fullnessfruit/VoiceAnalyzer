@@ -22,7 +22,7 @@ _CACHE_VERSION = "anime-va-3s-mean-v1"
 
 
 def list_speakers(config: Config) -> list[dict]:
-    return [{"speaker_id": name, "num_wavs": len(wavs)}
+    return [{"speaker_id": name, "num_samples": len(wavs)}
             for name, wavs in _reference_wavs(config).items()]
 
 
@@ -49,7 +49,7 @@ def enroll_speakers(config: Config, hub: ModelHub, speaker_id: str | None,
         with hub.lock:
             for name, wavs in available.items():
                 _embed_or_cache(config, hub, name, wavs, work / name, force=True)
-                saved.append({"speaker_id": name, "num_wavs": len(wavs),
+                saved.append({"speaker_id": name, "num_samples": len(wavs),
                               "model": "anime_va"})
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -98,7 +98,7 @@ def _reference_wavs(config: Config, speaker_id: str | None = None) -> dict[str, 
         if not directory.is_dir():
             continue
         wavs = sorted((path for path in directory.iterdir()
-                       if path.is_file() and path.suffix.lower() == ".wav"),
+                       if path.is_file() and path.suffix.lower() in {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus"}),
                       key=lambda path: path.name.lower())
         if wavs:
             found[directory.name] = wavs

@@ -2,7 +2,7 @@
 
 VoiceAnalyzer searches one local video or audio file for the voice of a registered actor. It is a
 same-speaker estimate, including acting styles, not a legal identification. It does not transcribe,
-synthesize, or transform speech and does not download media from a URL.
+synthesize, or transform speech. A broker worker downloads public X media and compares the requested names.
 
 The current detector uses the public Anime Speaker Embedding **VA** variant. Its weights are pinned
 to a revision and SHA-256 checksum in `app/config.py`; they are downloaded on first inference, not
@@ -18,7 +18,9 @@ Python 3.10 or 3.11 is preferred. Python 3.12 and newer is accepted with a warni
 creates or reuses `.venv`, installs `requirements.txt`, and prepares the shared
 `OCR_BROKER_SECRET`. It does not load model weights or start the server.
 
-Run `server.bat` on Windows or `./server.sh` on POSIX. Both start `uvicorn app.main:app` on
+For automatic extension analysis run `worker.bat` (or `worker_local.bat` for a local broker), or `./worker.sh` on POSIX. Set `OCR_BROKER_URL` to the same broker as ImageAnalyzer; both use `OCR_BROKER_SECRET` and no additional incoming port. In the extension, add names under the shared image/voice target list.
+
+For manual HTTP testing, run `server.bat` on Windows or `./server.sh` on POSIX. Both start `uvicorn app.main:app` on
 `127.0.0.1:8000` unless `HOST` or `PORT` is set. The server refuses to start without the existing
 shared key. It reads an explicit process environment value first, then the Windows user environment
 or the shared POSIX auth file. Installation reuses an existing key; it does not rotate it.
@@ -29,7 +31,7 @@ or the shared POSIX auth file. Installation reuses an existing key; it does not 
 
 ## Register voices
 
-Put several official WAV samples of **one actor** under `refs/<speaker_id>/`, including ordinary
+Put several official audio samples (WAV, MP3, FLAC, M4A, AAC, OGG or OPUS) of **one actor** under `data/<speaker_id>/`, including ordinary
 speech and different performance styles. Do not create a different speaker ID for each role. Each
 WAV produces one normalized embedding; recordings longer than 30 seconds become the mean of
 nonoverlapping 30-second chunks. The reference used for detection is the normalized, equal-weight
@@ -39,7 +41,7 @@ changes to WAV contents or model identity. Older ECAPA/WeSpeaker caches are left
 An authenticated `POST /enroll` with `{}` rebuilds all actors. With
 `{"speaker_id":"actor"}` it rebuilds one. With `file_paths`, it explicitly replaces that actor's
 reference WAVs from files under `data/` before rebuilding. `GET /speakers` lists actors with
-at least one WAV.
+at least one supported sample, with `num_samples`. No names settings file is needed. Folder names must exactly match the extension targets. References in an old `refs/` directory are not automatically moved.
 
 ## Match a file
 
@@ -90,8 +92,7 @@ All routes except `GET /health` require OCR1 HMAC-SHA256 authentication shared w
 and AnnouncementAggregator. The request signature covers method, path and query, timestamp,
 nonce, and SHA-256 of the raw body. Responses carry `X-Ocr-Signature`; clients must verify it.
 The key is never sent in HTTP. The manual `AnnouncementAggregator/voice-analyzer/client.js` and
-CLI implement this protocol; this project does not activate automatic extension analysis or
-Discord delivery.
+CLI implement this protocol. Automatic analysis uses the common broker; the extension collects results and controls Discord delivery.
 
 Media outside `data/` is rejected with 403 before speaker lookup. Missing media or speaker WAVs
 return 404. Files larger than 2 GiB or longer than three hours return 400. An audio track that
@@ -116,3 +117,14 @@ deployed path matches the measured configuration.
 Run `python -m pytest -q tests/test_match.py` inside `.venv` for scoring, window selection, cache
 invalidation, path restrictions, and a model-stubbed pipeline check. Real-model manual results and
 commands are saved only in Git-ignored `work/experiments/`; no media or weights are committed.
+
+
+## Multiple names and URLs
+
+`POST /match-names` accepts `{"names":["大西亜玖璃"],"media_url":"https://video.twimg.com/.../video.mp4"}` or `file_path` in place of `media_url`. It returns `matches` and `skippedNames`. If none of the requested folders has samples, it skips downloading and inference. Each file is decoded and embedded once even when several names are requested. MP4/M4A and completed unencrypted HLS are supported; HLS prefers audio-only renditions. Downloaded inputs are removed after processing.
+
+Image/voice broker jobs expire after one hour without a periodic cleanup timer; cleanup occurs on queue I/O. An OCR-only ImageAnalyzer does not consume image jobs. VoiceAnalyzer consumes only voice jobs. No worker is automatically started.
+
+## Battery shutdown
+
+`worker.bat` sets `VOICE_WORKER_BATTERY_SHUTDOWN_PERCENT=25` when unset. Set it to `0` to disable. Code and `worker.sh` default to disabled. A separate thread checks every `VOICE_WORKER_BATTERY_CHECK_MS` (60000) and schedules shutdown only while discharging at or below the threshold. `VOICE_WORKER_BATTERY_GRACE_SEC` defaults to 120; cancel with `shutdown /a`. Windows requires PowerShell 7 (`pwsh`) for the battery query. Charging, missing batteries and read errors do not trigger shutdown.

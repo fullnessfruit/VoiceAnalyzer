@@ -18,7 +18,8 @@ from app.match_log import MatchAuditLog
 from app.models import get_hub
 from app.paths import PathRejected, resolve_media_path
 from app.pipeline import match_file
-from app.schemas import EnrollRequest, MatchRequest
+from app.schemas import EnrollRequest, MatchRequest, NamesMatchRequest
+from app.named_match import match_requested
 
 
 def create_app(config: Config | None = None) -> FastAPI:
@@ -73,6 +74,20 @@ def create_app(config: Config | None = None) -> FastAPI:
                      speech_window_count=result["speech_window_count"], best=result.get("best"),
                      elapsed_ms=round((time.perf_counter() - started) * 1000))
         return response
+
+    @app.post("/match-names")
+    async def match_names(body: NamesMatchRequest):
+        request_id = uuid.uuid4().hex
+        audit.record("names_match_started", request_id=request_id, names=body.names, media_url=body.media_url)
+        try:
+            result = await _call(lambda: match_requested(
+                settings, body.names, file_path=body.file_path, media_url=body.media_url,
+                separate_bgm=body.separate_bgm))
+        except Exception as exc:
+            audit.record("names_match_failed", request_id=request_id, error=str(exc))
+            raise
+        audit.record("names_match_finished", request_id=request_id, **result)
+        return JSONResponse(result)
 
     @app.post("/enroll")
     async def enroll(body: EnrollRequest | None = None):

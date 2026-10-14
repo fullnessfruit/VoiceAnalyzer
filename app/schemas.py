@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _speaker_id(value: str) -> str:
@@ -41,6 +41,24 @@ class MatchRequest(BaseModel):
         if not valid or any(char.isspace() or ord(char) < 32 for char in value):
             raise ValueError("source_url must be an HTTP(S) URL without credentials")
         return value
+
+
+class NamesMatchRequest(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=200)
+    file_path: str | None = None
+    media_url: str | None = None
+    separate_bgm: bool = False
+
+    @field_validator("names")
+    @classmethod
+    def check_names(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(_speaker_id(value) for value in values))
+
+    @model_validator(mode="after")
+    def check_input(self):
+        if bool(self.file_path) == bool(self.media_url):
+            raise ValueError("provide exactly one of file_path or media_url")
+        return self
 
 
 class EnrollRequest(BaseModel):

@@ -22,7 +22,14 @@ logger = logging.getLogger("voiceanalyzer")
 
 
 def match_file(config: Config, media: Path, speaker_id: str, separate_bgm: bool) -> dict:
-    """Keep ffmpeg extraction outside the model lock and remove temporary PCM afterward."""
+    return match_files_for_names(config, media, [speaker_id], separate_bgm)[0]
+
+
+def match_files_for_names(config: Config, media: Path, names: list[str],
+                          separate_bgm: bool = False) -> list[dict]:
+    """Decode, detect speech and embed once; compare those windows with each person."""
+    if not names:
+        return []
     hub = get_hub(config)
     work = config.work_dir / uuid.uuid4().hex
     work.mkdir(parents=True, exist_ok=True)
@@ -55,22 +62,25 @@ def match_file(config: Config, media: Path, speaker_id: str, separate_bgm: bool)
 
             regions = speech_regions(samples, hub.vad(), config)
             if not regions:
-                return _payload(config, speaker_id, bgm_separated, 0, False, None, [],
-                                "no_speech")
+                return [_payload(config, name, bgm_separated, 0, False, None, [],
+                                 "no_speech") for name in names]
             windows = fixed_windows(len(samples), regions, config)
             if not windows:
-                return _payload(config, speaker_id, bgm_separated, 0, False, None, [],
-                                "insufficient_speech")
+                return [_payload(config, name, bgm_separated, 0, False, None, [],
+                                 "insufficient_speech") for name in names]
 
-            enrollment = load_enrollment(config, hub, speaker_id, work / "refs")
             pieces = [np.ascontiguousarray(samples[first:last]) for first, last, _ in windows]
             vectors = hub.embed_many(pieces)
             embedded = [WindowEmbedding(first / rate, last / rate, vector)
                         for (first, last, _), vector in zip(windows, vectors)]
-            decision = decide(embedded, enrollment, config.cosine_min)
-            reason = None if decision.present else "below_threshold"
-            return _payload(config, speaker_id, bgm_separated, len(windows),
-                            decision.present, decision.best, decision.segments, reason)
+            results = []
+            for name in names:
+                enrollment = load_enrollment(config, hub, name, work / "refs" / name)
+                decision = decide(embedded, enrollment, config.cosine_min)
+                reason = None if decision.present else "below_threshold"
+                results.append(_payload(config, name, bgm_separated, len(windows),
+                                        decision.present, decision.best, decision.segments, reason))
+            return results
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
