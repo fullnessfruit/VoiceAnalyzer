@@ -27,7 +27,7 @@ first, then the Windows user environment or shared POSIX auth file. Installation
 existing key; it does not rotate it. In the extension, add names under the shared image/voice target list.
 
 `uninstall.bat` or `./uninstall.sh` removes only `.venv`. It preserves source, `config.yaml`,
-`refs/`, `data/`, caches, logs, and the shared key. The separate `delete-shared-secret.bat` and
+`data/`, caches, logs, and the shared key. The separate `delete-shared-secret.bat` and
 `delete-shared-secret.sh` are the explicit key-removal tools.
 
 ## Register voices
@@ -41,7 +41,7 @@ changes to sample contents or model identity. Older ECAPA/WeSpeaker caches are l
 
 The worker discovers a requested actor's samples on demand and rebuilds that actor's cache when
 sample contents change. No enrollment API is needed. Folder names must exactly match the extension
-targets. References in an old `refs/` directory are not automatically moved.
+targets. Added or replaced samples are picked up on the next job without restarting the worker.
 
 ## Process a broker job
 
