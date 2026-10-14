@@ -33,8 +33,6 @@ class Config:
     log_dir: Path
     cosine_min: float
     device: str
-    demucs_model: str
-    demucs_shifts: int
     sample_rate: int = SAMPLE_RATE
     max_bytes: int = MAX_BYTES
     max_duration_sec: float = MAX_DURATION_SEC
@@ -51,12 +49,13 @@ def load_config(path: Path | None = None) -> Config:
     if not isinstance(raw, dict):
         raise ValueError("config.yaml must contain a mapping")
     thresholds = raw.get("thresholds") or {}
-    demucs = raw.get("demucs") or {}
-    if not isinstance(thresholds, dict) or not isinstance(demucs, dict):
-        raise ValueError("thresholds and demucs must be mappings")
+    if not isinstance(thresholds, dict):
+        raise ValueError("thresholds must be a mapping")
     ignored = sorted(set(thresholds) & {"ecapa_min", "wespeaker_min", "margin"})
     if ignored:
         logger.warning("legacy voice thresholds ignored - keys=%s", ",".join(ignored))
+    if "demucs" in raw:
+        logger.warning("legacy demucs settings ignored")
     root = config_path.resolve().parent
     cosine_min = float(thresholds.get("voice_min", DEFAULT_COSINE_MIN))
     if not -1.0 <= cosine_min <= 1.0:
@@ -70,8 +69,6 @@ def load_config(path: Path | None = None) -> Config:
         log_dir=(root / "log").resolve(),
         cosine_min=cosine_min,
         device=str(raw.get("device", "auto")),
-        demucs_model=str(demucs.get("model", "htdemucs_ft")),
-        demucs_shifts=int(demucs.get("shifts", 0)),
     )
     for directory in (config.data_dir, config.refs_dir, config.work_dir,
                       config.cache_dir, config.log_dir):

@@ -36,15 +36,16 @@
 
 ## 프로젝트 개요
 
-로컬 또는 공개 X 영상·음성에서 등록 성우와 같은 목소리로 추측할 만한 발화 창을 찾는 브로커 워커·수동 FastAPI 서버다.
-결과는 법적 동일인 확인이나 화자 신원 확률이 아니다. `uvicorn app.main:app`으로 기동하고
-AnnouncementAggregator의 수동 Node 클라이언트와 OCR1 인증을 공유한다. ASR, 대사 전사, TTS,
-목소리 변환, LLM은 판정에 호출하지 않는다. 확장 자동 분석은 공통 브로커를 통해 요청·결과만 교환하고 Discord 판정·전송은 확장이 맡는다. 워커는 수신 포트를 열지 않는다. 수동 `/match`의 `source_url`은 메타데이터이며 `/match-names`의 `media_url`과 브로커 작업의 `mediaUrls`는 내려받을 실제 미디어 주소다.
+공개 X 영상·음성에서 등록 성우와 같은 목소리로 추측할 만한 발화 창을 찾는 브로커 워커다.
+결과는 법적 동일인 확인이나 화자 신원 확률이 아니다. ASR, 대사 전사, TTS, 목소리 변환,
+LLM은 판정에 호출하지 않는다. AnnouncementAggregator는 공통 브로커에 음성 작업을 넣고,
+`app.worker`가 작업을 가져와 결과를 돌려준다. Discord 판정·전송은 확장이 맡는다.
+워커는 수신 포트를 열지 않으며, `mediaUrls`는 내려받을 실제 공개 미디어 주소다.
 
 ## 판정과 전처리 결정
 
 - 유일한 판정 모델은 공개 Anime Speaker Embedding `va` 변형이다. 이 변형은 캐릭터가 아닌
-  성우를 묶도록 학습된 ECAPA 계열이지만, 이 서버의 점수를 일반 SpeechBrain ECAPA 점수로
+  성우를 묶도록 학습된 ECAPA 계열이지만, 이 모델의 점수를 일반 SpeechBrain ECAPA 점수로
   부르지 않는다. Hugging Face 저장소·revision·가중치 SHA-256을 `app/config.py`에 고정한다.
   가중치는 처음 추론할 때 받고 SHA와 모델 state key를 검증한다.
 - ffmpeg가 입력을 16 kHz mono PCM16으로 만든다. Silero VAD는 최소 250 ms 발화와 0 ms pad로
@@ -59,9 +60,8 @@ AnnouncementAggregator의 수동 Node 클라이언트와 OCR1 인증을 공유�
   하므로 두 이름이 같은 창에서 모두 통과할 가능성은 남는다. 코사인이 임계값 미만이면
   `below_threshold`, VAD가 비었으면 `no_speech`, VAD는 있으나 유효한 3초 창이 없으면
   `insufficient_speech`다. 뒤의 두 결과는 화자 구별 성공으로 세지 않는다.
-- 화자 분할·군집화는 호출하지 않으며 응답 `diarization`은 `none`, `ensemble`은 false다.
-  필요하면 `separate_bgm=true`로 Demucs vocals를 먼저 만들지만 이 선택 경로는 현재 임계값
-  측정에 포함되지 않았다. 실패하면 원본 믹스로 계속하고 한 줄 오류 로그를 남긴다.
+- 화자 분할·군집화·BGM 분리는 호출하지 않는다. 브로커 워커는 측정 때와 같은 원본 믹스를
+  사용한다. 예전 다중 모델·분리 상태를 나타내던 응답 필드도 없다.
 - `best`는 점수를 계산한 창이 있으면 탈락 요청에도 최고 창을 넣는다. `segments`는 통과한
   창만 시작 시각순으로 넣는다. `best.score`와 `segments[].score`는 같은 평균 참조 코사인이다.
   `reference`는 해당 창에 가장 가까운 개별 WAV 이름이다.
@@ -83,26 +83,21 @@ AnnouncementAggregator의 수동 Node 클라이언트와 OCR1 인증을 공유�
 `config.yaml`은 사용자 파일이라 기존 내용을 자동으로 바꾸지 않는다. 현재 파일의
 `thresholds.ecapa_min`, `wespeaker_min`, `margin`, `clustering.*`, `models.*`는 새 판정이 읽지
 않는다. 오래된 임계값 키는 기동 때 한 줄 경고로 알린다. 유효한 재설정 키는
-`thresholds.voice_min`, `device`, `demucs.model`, `demucs.shifts`다. `device`는 `auto`, `cpu`,
-`cuda` 또는 torch가 받는 명시적 장치 문자열이며 명시적 CUDA 실패는 숨기지 않는다.
+`thresholds.voice_min`, `device`다. 기존 `demucs` 설정도 사용하지 않고 기동 때 한 줄
+경고한다. `device`는 `auto`, `cpu`, `cuda` 또는 torch가 받는 명시적 장치 문자열이며
+명시적 CUDA 실패는 숨기지 않는다.
 
-## 요청 경로와 잠금
+## 작업 경로와 잠금
 
-`POST /match`: `main._accept_media`가 `data/` 경로·크기·길이를 먼저 확인한 뒤
-`speaker_has_wavs`가 등록 여부를 본다. `pipeline.match_file`이 작업 UUID 아래 PCM을 만들고
-`ModelHub.lock` 안에서 선택적 분리, VAD, 참조 캐시, 임베딩, 점수 판정을 수행한다. ffmpeg
-추출은 락 밖이다. `finally`가 UUID 작업 디렉터리를 지운다. FastAPI는 동기 추론을
-`run_in_threadpool`에서 실행한다. `PathRejected`만 명시적 HTTP 상태로 옮기며 나머지 예외는
-서버 실패다. 질의 파일이 디코딩되지 않으면 400이고 `present:false`로 바꾸지 않는다.
-라우트에 들어온 요청은 분석 전에 `match_started`, 성공·실패 뒤 `match_finished`를
-`log/`에 한 줄씩 기록한다. 동일한 `request_id`와 원본 URL·파일 경로·대상 성우로 두 행을
-연결한다. URL은 호출자가 `source_url`로 명시한 것만 쓰며 경로나 파일명에서 유추하지 않는다.
-본문 검증·OCR1 인증에서 거절된 요청은 라우트에 도달하지 않아 이 로그의 범위 밖이다.
-
-`POST /enroll`: 본문 없음·빈 객체면 WAV가 있는 모든 성우를 다시 계산한다. `speaker_id`
-하나면 해당 성우만 재계산한다. `file_paths`는 `data/` 안의 WAV 경로를 검증하고 명시적으로
-그 성우의 `data/<이름>/`를 교체한 뒤 새 캐시를 만든다. 등록 참조의 ffmpeg와 임베딩은 모델 락
-안이다. `GET /health`는 모델을 열지 않고, `GET /speakers`는 지원 샘플 수(`num_samples`)만 센다.
+`worker.run_job`은 브로커가 준 이름 중 샘플 폴더가 있는 이름만 고르고, 미디어 URL마다
+`named_match.match_requested`를 호출한다. 대상 이름이 없으면 다운로드·모델 추론을 생략한다.
+`downloaded_media`는 HTTPS `video.twimg.com` 입력을 `data/.incoming/`에 받은 뒤 경로·크기·길이를
+검사하고 `finally`에서 입력 디렉터리를 지운다. `pipeline.match_files_for_names`는 작업 UUID 아래
+PCM을 만들고 `ModelHub.lock` 안에서 VAD, 참조 캐시, 임베딩, 이름별 점수 판정을
+수행한다. ffmpeg 추출은 락 밖이다. 파이프라인도 `finally`에서 작업 디렉터리를 지운다.
+디코딩·입력·모델 오류는 `present:false`로 바꾸지 않고 작업 오류로 브로커에 보고한다.
+`MatchAuditLog`는 job ID, 원본 포스트 URL, 미디어 URL과 결과·오류를 UTC 한 줄 로그에 남긴다.
+참조 파일 변경은 내용 지문을 통해 다음 작업에서 자동으로 캐시를 갱신한다.
 
 ## 파일별 상세
 
@@ -110,30 +105,22 @@ AnnouncementAggregator의 수동 Node 클라이언트와 OCR1 인증을 공유�
 
 `config.yaml`은 사용자가 가진 설정 파일이고 위에 적힌 새 키만 유효하다. 의존성 파일은
 `anime_speaker_embedding==0.2.1`과 Silero 6.2.3을 포함하며, 구 ECAPA 직접 로드·WeSpeaker·
-pyannote를 직접 설치하거나 scikit-learn 군집화 API를 호출하지 않는다. Demucs는 선택적 분리용이다. README는
-설치·수동 API·점수 의미를 설명한다. `app/__init__.py`는 패키지 docstring 외 동작이 없다.
+pyannote를 직접 설치하거나 scikit-learn 군집화 API를 호출하지 않는다. FastAPI·uvicorn·
+Pydantic·Demucs는 워커 실행에 필요 없어 설치하지 않는다. README는
+설치·브로커 작업·점수 의미를 설명한다. `app/__init__.py`는 패키지 docstring 외 동작이 없다.
 
 ### `app/config.py`
 
-`Config`는 frozen dataclass로 루트와 저장 디렉터리, 코사인 임계값, 장치, Demucs 설정,
+`Config`는 frozen dataclass로 루트와 저장 디렉터리, 코사인 임계값, 장치,
 고정 오디오 상수를 담는다. `load_config(path=None)`는 YAML의 부모를 루트로 삼아
 `data/`, `work/`, `cache/`, `log/`를 만든다. 테스트가 임시 YAML을 주면 그 부모에만 만든다.
-YAML 루트와 하위 `thresholds`/`demucs`가 mapping인지 검증하고 임계값은 [-1,1]로 제한한다.
-옛 임계값 키는 무시하며 이름만 기록하는 한 줄 경고를 낸다. 모델 ID·윈도 길이는 YAML로
+YAML 루트와 하위 `thresholds`가 mapping인지 검증하고 임계값은 [-1,1]로 제한한다.
+옛 임계값 키와 `demucs`는 무시하며 각각 한 줄 경고를 낸다. 모델 ID·윈도 길이는 YAML로
 바뀌지 않아 측정한 처리 조건이 유지된다.
-
-### `app/schemas.py`
-
-`_speaker_id`는 공백·끝 점·Windows 금지 문자·제어 문자를 거절해 참조 폴더 경로와 캐시 파일명을
-안전하게 만든다. 한글은 허용한다. `MatchRequest`는 파일 경로, 등록 ID, `separate_bgm`,
-선택적 `source_url`을 받으며 분리 기본값은 false다. `check_source_url`은 HTTP(S) URL,
-호스트 존재, 자격증명 없음, 공백·제어문자 없음, 최대 4096자를 검사하고 원문 문자열을 보존한다.
-URL은 판정 입력이 아니라 원본을 추적하는 메타데이터다. `EnrollRequest`의 ID·경로 목록은 선택이므로 빈 POST는
-전체 재계산을 뜻한다. 점수 판정이나 모델 로드는 이 파일에 없다.
 
 ### `app/match_log.py`
 
-`MatchAuditLog`는 앱 인스턴스 시작 UTC 시각과 무작위 접미사로 고유한
+`MatchAuditLog`는 워커 인스턴스 시작 UTC 시각과 무작위 접미사로 고유한
 `log/match-log_<UTC>-<id>.log` 파일을 정한다. `record`는 매번 UTC 밀리초 ISO 시각을
 `[...Z]`로 행 앞에 쓰고 JSON을 한 줄로 직렬화한다. 줄바꿈은 JSON escape가 맡으며
 프로세스 안의 동시 요청은 `Lock`으로 append를 직렬화한다. 기록할 때마다 파일을 닫아
@@ -146,16 +133,18 @@ URL은 판정 입력이 아니라 원본을 추적하는 메타데이터다. `En
 `_run`은 셸 없이 argv로 ffmpeg/ffprobe를 호출하고 한 시간 타임아웃을 둔다.
 `probe_duration`은 `format=duration`을 float로 읽어 음수를 거절한다.
 `extract_mono`는 입력 형식과 관계없이 `-vn -ac 1 -ar 16000 pcm_s16le` WAV를 만든다.
-`read_mono_pcm16`/`write_mono_pcm16`은 우리 PCM WAV의 16-bit 스케일을 float와 왕복하며
-읽기에서 다채널이면 평균한다. 질의 고정 창은 샘플 인덱스로 직접 자른다.
+`read_mono_pcm16`은 우리 PCM WAV의 16-bit 스케일을 float로 읽고 다채널이면 평균한다.
+질의 고정 창은 샘플 인덱스로 직접 자른다.
 
 ### `app/paths.py`
 
-`PathRejected`는 상태 코드와 detail을 운반한다. `_is_inside`는 resolve된 경로가 `data/`
-아래인지 검사하고, Windows의 대소문자 차이만 `normcase`로 다시 본다. 디렉터리 접두
-`data`와 `database`를 혼동하지 않는다. `resolve_media_path`는 상대 경로에 설정 루트를
-붙이고 심링크를 해소한 뒤 경로 밖 403, 없음 404, 2 GiB 초과 400, ffprobe 실패 400,
-3시간 초과 400 순서로 검사한다. ffprobe 바이너리 없음은 500이다. 성우 등록 검사는 그 뒤다.
+`PathRejected`는 분석할 수 없는 입력·참조의 이유를 운반한다. `validate_speaker_id`는
+공백·끝 점·Windows 금지 문자·제어 문자를 거절해 브로커 이름이 참조 폴더·캐시 경로를
+벗어나지 못하게 한다. 한글은 허용한다. `_is_inside`는 resolve된 경로가 `data/` 아래인지
+검사하고, Windows의 대소문자 차이만 `normcase`로 다시 본다. 디렉터리 접두 `data`와
+`database`를 혼동하지 않는다. `resolve_media_path`는 상대 경로에 설정 루트를 붙이고
+심링크를 해소한 뒤 경로 밖, 파일 없음, 2 GiB 초과, ffprobe 실패, 3시간 초과 순서로
+검사한다. ffprobe 바이너리 부재와 디코딩 실패는 모두 이유가 있는 작업 오류다.
 
 ### `app/scoring.py`
 
@@ -180,18 +169,16 @@ URL은 판정 입력이 아니라 원본을 추적하는 메타데이터다. `En
 프로세스 동안 고정하고 선택을 한 줄 기록한다. `voice`는 public Hugging Face checkpoint를
 정확한 revision으로 받아 SHA-256 확인 후 AnimeSpeakerEmbedding `va`를 eval 상태로 열고
 strict state-key 검사를 한다. 로드 실패는 요청 실패로 올라가며 다른 모델로 조용히 대체하지
-않는다. `vad`는 Silero를, `demucs`는 `htdemucs_ft` Separator를 필요할 때만 로드한다.
+않는다. `vad`는 Silero를 필요할 때만 로드한다.
 `embed_many`는 동일 길이의 비어 있지 않은 16 kHz float 창을 8개씩 텐서로 추론하고
 192차원·finite·비영벡터를 확인해 정규화한다. `get_hub`는 전역 하나를 만들고 이후 다른
 Config를 무시한다. `RLock`이라 파이프라인이 락을 잡고 각 메서드에 재진입할 수 있다.
 
 ### `app/enroll.py`
 
-`list_speakers`는 data 바로 아래 이름별 폴더의 WAV/MP3/FLAC/M4A/AAC/OGG/OPUS 샘플 수(`num_samples`)를 표시하고 `speaker_has_wavs`는 등록
-여부만 본다. `_reference_wavs`는 점으로 시작하는 staging/bak 디렉터리를 숨기고 이름을
-대소문자 무시 정렬한다. `enroll_speakers`는 필요 시 `_replace_references`를 먼저 수행하고
-모델 락 안에서 각 대상에 `_embed_or_cache(force=True)`를 호출한다. `load_enrollment`는
-요청한 성우 하나만 읽거나 계산하며 호출자가 모델 락을 가진다.
+`list_speakers`는 data 바로 아래 이름별 폴더의 WAV/MP3/FLAC/M4A/AAC/OGG/OPUS 샘플 수(`num_samples`)를 표시한다.
+`_reference_wavs`는 점으로 시작하는 임시 디렉터리를 숨기고 이름을 대소문자 무시 정렬한다.
+`load_enrollment`는 요청한 성우 하나만 읽거나 계산하며 호출자가 모델 락을 가진다.
 
 `embed_waveform`은 `_windows`로 30초 비중첩 조각을 만들고 조각 평균을 하나의 참조
 벡터로 만든다. `_windows`는 이미 조각이 있으면 0.5초 미만 꼬리만 버린다.
@@ -200,23 +187,21 @@ Config를 무시한다. `RLock`이라 파이프라인이 락을 잡고 각 메�
 `_cache_path`는 기존 캐시를 덮지 않는 `cache/enroll_anime_va_v1/{id}.npz`다.
 `_read_cache`는 지문·이름 수·192차원·finite를 검사하고 손상은 로그 후 캐시 미스로 본다.
 `_write_cache`는 임시 npz를 완성한 뒤 `os.replace`로 게시한다.
-`_embed_or_cache`는 지문 일치 여부와 force를 보고 `_average_wavs`를 호출한다.
+`_embed_or_cache`는 지문이 일치하면 캐시를 쓰고, 아니면 `_average_wavs`를 호출한다.
 `_average_wavs`는 각 소스를 ffmpeg로 임시 PCM에 옮겨 벡터를 얻고, 파일별 벡터를 같은
-가중치로 평균한다. ffmpeg 부재는 500, WAV 디코드 실패는 이름 포함 400이다.
-`_replace_references`는 staging 복사, 기존 디렉터리 bak 이동, 새 디렉터리 이름 변경을
-순서대로 하고 실패 시 bak을 되돌린다. 교체는 명시적인 file_paths 요청에서만 일어난다.
+가중치로 평균한다. ffmpeg 부재와 파일별 디코드 실패는 정상 판정으로 바꾸지 않고 예외를
+올리며, 디코드 실패 이유에는 파일 이름을 포함한다. 참조 샘플은 워커가 교체하지 않는다.
 
 ### `app/pipeline.py`
 
-`match_file`은 단일 이름으로 `match_files_for_names`를 호출한다. 다중 이름 경로는 ffmpeg 추출·BGM 분리·VAD·질의 창 임베딩을 파일당 한 번만 실행하고, 모델 락 안에서 이름별 참조 캐시와 `decide`만 반복한다. 추출 오류는 400/500이다. 3초 창이
+`match_files_for_names`는 ffmpeg 추출·VAD·질의 창 임베딩을 파일당 한 번만
+실행하고, 모델 락 안에서 이름별 참조 캐시와 `decide`만 반복한다. 추출 오류는 예외다. 3초 창이
 없으면 참조 모델을 열지 않는다. `finally`는 작업 디렉터리를 제거한다.
-`_separate_vocals`는 Demucs vocals 텐서를 채널 평균하고 필요하면 16 kHz로 리샘플해
-PCM16으로 쓴다. 예외는 호출부가 한 줄 기록하고 원본 믹스로 되돌린다.
-`_payload`는 `model`, `threshold`, `window_seconds`, `speech_window_count`, 호환용
-`ensemble:false`, `diarization:none`, BGM 상태와 판정·구간을 담는다. 점수가 없으면
+`_payload`는 `model`, `threshold`, `window_seconds`, `speech_window_count`와 판정·구간을
+담는다. 점수가 없으면
 `best`를 생략하고, 사유가 없으면 `reason`을 생략한다.
 
-### `app/shared_secret.py`, `app/auth.py`
+### `app/shared_secret.py`
 
 `shared_secret._stored_secret`/`_secret_path`는 Windows 사용자 환경 또는 POSIX 공유
 `auth.json`의 `OCR_BROKER_SECRET`을 읽는다. `read_secret`/`require_secret`은 명시적
@@ -226,40 +211,20 @@ POSIX 게시에는 0600 임시 파일과 hard link를 써 동시 설치 때 기�
 `_notify_windows_environment`는 변경을 Explorer에 통지한다. `delete_secret`과 CLI
 `delete`는 명시적 제거이며 일반 uninstall이 호출하지 않는다. CLI `show`만 키를 출력한다.
 
-`OcrAuthMiddleware`는 `/health` 외 요청의 원본 바이트·OCR1 HMAC, 기동 이후 ±2분
-timestamp, nonce 재사용, 1 MiB 본문 한도를 라우팅 전에 확인한다. 성공한 응답과 라우트
-오류의 완성 바이트에 `X-Ocr-Signature`를 붙인다. `_error`는 인증 전 거절을 보내며
-서명·키·본문을 로그에 남기지 않는다. 단일 uvicorn 프로세스를 전제로 nonce를 메모리에 둔다.
-
-### `app/main.py`
-
-`create_app`은 `require_secret`을 먼저 확인하고 설정·라우트를 닫아 캡처한다.
-`/health`는 모델 로드 없는 상태 응답, `/speakers`는 등록 목록, `/match`는
-`_accept_media` 다음에 등록 WAV를 검사한다. 매치 라우트는 검증된 본문을 받으면 즉시
-`match_started`를 기록하고, 성공에는 `present`·사유·유효 창 수·최고 창, HTTP 오류에는
-상태·detail, 그 외 예외에는 500·예외 종류를 `match_finished`로 기록한다. 양쪽 모두
-요청 ID·명시된 원본 URL·로컬 경로·찾는 성우를 반복해 한 행만 검색해도 출처가 보인다.
-처리 시간은 단조 시계로 잰다. 로그 작성 자체가 실패하면 조용히 분석을 계속하지 않는다.
-`/enroll`은 `_accept_enrollment_wavs`
-검증 뒤 `get_hub`와 스레드풀을 쓴다. `_accept_media`와 `_call`은 `PathRejected`만
-HTTPException으로 바꾼다. `_accept_enrollment_wavs`는 빈 목록과 비WAV·데이터 밖 경로를
-거절한다. 모듈 하단 `app=create_app()`가 uvicorn 진입점이다.
-
 ### `tests/test_match.py`
 
 모델 가중치 없이 평균 참조가 개별 샘플의 높은 점수보다 우선함, 임계값의 비반올림 판정,
-3초 창의 50% 경계·미완성 꼬리, 내용 기반 캐시 지문, data 밖 403, 모의 모델을 통한
+3초 창의 50% 경계·미완성 꼬리, 내용 기반 캐시 지문, data 밖 경로·브로커 이름 거절,
+모의 모델을 통한
 파이프라인 결과·임시 디렉터리 정리를 검사한다. 공개 미디어와 실제 모델의 수동 재현
 실험은 Git 제외 `work/experiments/`에 JSON·로그로 따로 둔다.
 
 ### 실행·설치·제거 스크립트
 
-`server.bat`/`server.sh`는 스크립트 루트에서 `.venv` Python을 우선 사용해 단일
-uvicorn을 `127.0.0.1:8000`에 띄우며 `HOST`/`PORT`가 있으면 따른다.
 `install.bat`/`install.sh`는 기존 `.venv`를 재사용하거나 Python 3.11→3.10→기본
 Python으로 새 환경을 만들고 pip 의존성을 설치한다. 3.10 미만은 거절, 3.12 이상은
 경고한다. ffmpeg/ffprobe 부재는 설치 경고다. 가중치는 받지 않고 마지막에 공유 키만
-준비한다. 더는 WeSpeaker용 Git 설치가 필요 없다.
+준비한다. 설치 뒤 `server.bat`/`worker.sh` 실행을 안내한다. 더는 WeSpeaker용 Git 설치가 필요 없다.
 `uninstall.bat`/`uninstall.sh`는 링크가 아닌 `.venv`만 지우며 참조·미디어·캐시·로그·공유 키를
 남긴다. `delete-shared-secret.bat`/`.sh`는 명시적으로 공유 키만 지운다.
 
@@ -268,15 +233,17 @@ Python으로 새 환경을 만들고 pip 의존성을 설치한다. 3.10 미만�
 
 ### 샘플과 실행
 
-이름 설정 파일은 없다. `data/大西亜玖璃/sample1.wav`처럼 인물별 폴더를 만들고 여러 연기 톤의 샘플을 넣는다. `Config.refs_dir`도 이 data 경로를 가리킨다. 폴더 이름이 확장 공통 대상 이름과 정확히 같아야 한다. 점으로 시작하는 `.incoming`·임시 폴더는 인물이 아니다. 샘플별 평균 판정·기존 캐시 검증은 그대로이며 API 요청 때 필요한 이름만 지연 계산한다. 기존 refs 폴더는 자동 이동하거나 합치지 않는다.
+이름 설정 파일은 없다. `data/大西亜玖璃/sample1.wav`처럼 인물별 폴더를 만들고 여러 연기 톤의 샘플을 넣는다. `Config.refs_dir`도 이 data 경로를 가리킨다. 폴더 이름이 확장 공통 대상 이름과 정확히 같아야 한다. 점으로 시작하는 `.incoming`·임시 폴더는 인물이 아니다. 샘플별 평균 판정·기존 캐시 검증은 그대로이며 브로커 작업이 요청한 이름만 지연 계산한다. 기존 refs 폴더는 자동 이동하거나 합치지 않는다.
 
-`worker.bat`은 `.venv` 우선 Python으로 `app.worker`를 실행한다. 기본 브로커 주소는 ImageAnalyzer와 같은 EC2 주소이며 `OCR_BROKER_URL`로 바꾼다. `worker_local.bat`은 127.0.0.1:3100을 지정하고 같은 런처를 부른다. `worker.sh`는 환경변수 또는 코드 기본 localhost:3100을 사용한다. `server.bat/server.sh`의 직접 HTTP 서버는 수동 시험용으로 유지하며 자동 연동에 실행할 필요가 없다. ffmpeg/ffprobe와 Windows 배터리 조회용 pwsh는 PATH에 있어야 한다.
+`server.bat`은 `.venv` 우선 Python으로 `app.worker`를 실행한다. 기본 브로커 주소는 ImageAnalyzer와 같은 EC2 주소이며 `OCR_BROKER_URL`로 바꾼다. `server_local.bat`은 127.0.0.1:3100을 지정하고 같은 런처를 부른다. `server_shutdown.bat`은 Windows에 2시간 후 종료를 예약하고 성공하면 동일 워커를 실행한다. 예약은 창을 닫아도 유지되며 `shutdown /a`로 취소한다. `worker.sh`는 환경변수 또는 코드 기본 localhost:3100을 사용한다. 모두 브로커에 나가는 요청만 보내고 로컬 수신 포트는 열지 않는다. ffmpeg/ffprobe와 Windows 배터리 조회용 pwsh는 PATH에 있어야 한다.
 
-### `app/named_match.py`, `NamesMatchRequest`
+### `app/named_match.py`
 
-`requested_speakers`는 요청 이름을 검증·중복 제거하고 `list_speakers`에 있는 이름과 없는 이름으로 나눈다. `match_requested`는 일치 이름이 없으면 다운로드·모델 실행 없이 `{matches:[], skippedNames, reason:no_registered_names}`를 반환한다. 일치하면 로컬 경로를 검증하거나 미디어를 내려받아 `match_files_for_names`로 한 번 비교한다.
-
-서명된 `POST /match-names`는 `{names:[...], file_path}` 또는 `{names:[...], media_url}` 중 정확히 하나의 입력을 받고 `separate_bgm`은 선택이다. `matches`는 이름마다 기존 `/match`와 같은 판정 객체, `skippedNames`는 미등록 이름이다. API는 시작·완료·실패를 `MatchAuditLog`에 남기며 요청 본문의 이름 경로 탈출 문자는 schema에서 거절한다. 기존 `/match`와 `/enroll`도 현재 data 이름 폴더를 사용한다.
+`requested_speakers`는 `paths.validate_speaker_id`로 브로커 이름을 검증·중복 제거하고
+`list_speakers`에 있는 이름과 없는 이름으로 나눈다. `match_requested`는 일치 이름이 없으면
+다운로드·모델 실행 없이 `{matches:[], skippedNames, reason:no_registered_names}`를 반환한다.
+일치하면 공개 미디어 URL을 내려받아 `match_files_for_names`로 한 번 비교한다. 로컬 파일
+경로를 받는 HTTP API는 없다. `run_job`이 원본 URL과 결과를 `MatchAuditLog`에 기록한다.
 
 ### `app/media_download.py`
 
@@ -294,6 +261,6 @@ Python으로 새 환경을 만들고 pip 의존성을 설치한다. 3.10 미만�
 
 ### `app/battery.py`
 
-`read_battery`는 Windows에서 pwsh CIM으로 첫 배터리의 잔량과 BatteryStatus를 읽고 값 1만 방전으로 본다. 배터리 없음·조회 실패·비Windows는 종료하지 않는다. `BatteryShutdown.from_env`는 `VOICE_WORKER_BATTERY_SHUTDOWN_PERCENT`(코드 기본 0), `VOICE_WORKER_BATTERY_CHECK_MS`(60000), `VOICE_WORKER_BATTERY_GRACE_SEC`(120)를 읽고 범위를 검증한다. `worker.bat`은 명시한 값이 없을 때 임계값 25를 넣는다.
+`read_battery`는 Windows에서 pwsh CIM으로 첫 배터리의 잔량과 BatteryStatus를 읽고 값 1만 방전으로 본다. 배터리 없음·조회 실패·비Windows는 종료하지 않는다. `BatteryShutdown.from_env`는 `VOICE_WORKER_BATTERY_SHUTDOWN_PERCENT`(코드 기본 0), `VOICE_WORKER_BATTERY_CHECK_MS`(60000), `VOICE_WORKER_BATTERY_GRACE_SEC`(120)를 읽고 범위를 검증한다. `server.bat`은 명시한 값이 없을 때 임계값 25를 넣는다.
 
 `start`의 독립 daemon thread가 분석 루프와 무관하게 체크한다. `check`는 방전 중 임계값 이하이면 기존 예약을 취소하고 `shutdown /s /t <유예>`로 종료를 예약한다. 성공 후에는 다시 예약하지 않아 사용자가 `shutdown /a`로 취소할 수 있다. 예약 실패는 다음 주기에 재시도한다. 워커 종료 시 stop 이벤트로 스레드를 멈춘다. 실제 종료 명령은 로컬 테스트에서 모킹하여 검증한다.

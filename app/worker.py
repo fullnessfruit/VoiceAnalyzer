@@ -28,7 +28,7 @@ def run_job(config, job: dict, audit: MatchAuditLog) -> dict:
     errors = []
     for url in dict.fromkeys(job.get("mediaUrls", [])):
         try:
-            result = match_requested(config, selected, media_url=url)
+            result = match_requested(config, selected, url)
             matches.extend({**item, "mediaUrl": url} for item in result["matches"])
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")

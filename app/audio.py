@@ -86,17 +86,6 @@ def extract_mono(source: Path, dest: Path, sample_rate: int) -> None:
         raise AudioReadError(detail or "ffmpeg failed to extract audio")
 
 
-def write_mono_pcm16(path: Path, samples: np.ndarray, sample_rate: int) -> None:
-    clipped = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
-    pcm = (clipped * 32767.0).astype("<i2")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(sample_rate)
-        handle.writeframes(pcm.tobytes())
-
-
 def read_mono_pcm16(path: Path) -> tuple[np.ndarray, int]:
     with wave.open(str(path), "rb") as handle:
         if handle.getsampwidth() != 2:
