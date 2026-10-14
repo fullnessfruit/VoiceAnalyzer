@@ -130,6 +130,9 @@ YAML 루트와 하위 `thresholds`가 mapping인지 검증하고 임계값은 [-
 ### `app/audio.py`
 
 `AudioReadError`와 하위 `FFmpegMissing`은 디코드 실패와 실행 파일 부재를 구분한다.
+`_binary`는 Windows에서 현재 Python 옆에 ffmpeg.exe·ffprobe.exe가 모두 있으면 그 쌍을
+우선 사용하고, 아니면 PATH를 사용한다. 설치한 가상환경의 도구를 사용자 PATH 수정 없이
+찾기 위한 선택이다.
 `_run`은 셸 없이 argv로 ffmpeg/ffprobe를 호출하고 한 시간 타임아웃을 둔다.
 `probe_duration`은 `format=duration`을 float로 읽어 음수를 거절한다.
 `extract_mono`는 입력 형식과 관계없이 `-vn -ac 1 -ar 16000 pcm_s16le` WAV를 만든다.
@@ -223,10 +226,22 @@ POSIX 게시에는 0600 임시 파일과 hard link를 써 동시 설치 때 기�
 
 `install.bat`/`install.sh`는 기존 `.venv`를 재사용하거나 Python 3.11→3.10→기본
 Python으로 새 환경을 만들고 pip 의존성을 설치한다. 3.10 미만은 거절, 3.12 이상은
-경고한다. ffmpeg/ffprobe 부재는 설치 경고다. 가중치는 받지 않고 마지막에 공유 키만
-준비한다. 설치 뒤 `server.bat`/`worker.sh` 실행을 안내한다. 더는 WeSpeaker용 Git 설치가 필요 없다.
+경고한다. Windows는 `app.ffmpeg_install`로 ffmpeg/ffprobe를 준비한 뒤 공유 키를
+준비하며, 도구 설치가 실패하면 전체 설치도 실패한다. POSIX는 ffmpeg/ffprobe 부재를
+경고한다. 가중치는 받지 않는다. 설치 뒤 `server.bat`/`worker.sh` 실행을 안내한다.
+더는 WeSpeaker용 Git 설치가 필요 없다.
 `uninstall.bat`/`uninstall.sh`는 링크가 아닌 `.venv`만 지우며 참조·미디어·캐시·로그·공유 키를
 남긴다. `delete-shared-secret.bat`/`.sh`는 명시적으로 공유 키만 지운다.
+
+### `app/ffmpeg_install.py`
+
+Windows 설치만 호출하는 표준 라이브러리 도구다. `main`은 현재 가상환경에
+ffmpeg.exe·ffprobe.exe가 모두 작동하면 재사용하고, 그 쌍이 없을 때만 PATH의 작동하는
+두 도구를 확인한다. 둘 다 없으면 FFmpeg 다운로드 페이지가 연결하는 Gyan의 9.0.2
+essentials ZIP을 내려받는다. `_download`는 크기를 제한하고 `_sha256`은 ZIP을 스트리밍
+해시한다. `install_archive`는 고정 SHA-256을 검증한 뒤 ZIP의 두 실행 파일과
+라이선스·README만 현재 Python 옆에 임시 파일로 추출해 교체한다. `_works`는 각 도구의
+`-version` 실행 성공을 검사한다. ZIP은 임시 디렉터리에서 자동 삭제된다.
 
 
 ## 공통 브로커 음성 작업
@@ -235,7 +250,7 @@ Python으로 새 환경을 만들고 pip 의존성을 설치한다. 3.10 미만�
 
 이름 설정 파일은 없다. `data/大西亜玖璃/sample1.wav`처럼 인물별 폴더를 만들고 여러 연기 톤의 샘플을 넣는다. `Config.refs_dir`도 이 data 경로를 가리킨다. 폴더 이름이 확장 공통 대상 이름과 정확히 같아야 한다. 점으로 시작하는 `.incoming`·임시 폴더는 인물이 아니다. 샘플별 평균 판정·기존 캐시 검증은 그대로이며 브로커 작업이 요청한 이름만 지연 계산한다. 프로젝트 최상위의 `refs/` 폴더는 사용하지 않는다. 요청마다 대상 이름의 샘플 폴더를 다시 조회하므로 샘플 추가·이동은 워커 재시작 없이 다음 작업부터 반영된다.
 
-`server.bat`은 `.venv` 우선 Python으로 `app.worker`를 실행한다. 기본 브로커 주소는 ImageAnalyzer와 같은 EC2 주소이며 `OCR_BROKER_URL`로 바꾼다. `server_local.bat`은 127.0.0.1:3100을 지정하고 같은 런처를 부른다. `server_shutdown.bat`은 Windows에 2시간 후 종료를 예약하고 성공하면 동일 워커를 실행한다. 예약은 창을 닫아도 유지되며 `shutdown /a`로 취소한다. `worker.sh`는 환경변수 또는 코드 기본 localhost:3100을 사용한다. 모두 브로커에 나가는 요청만 보내고 로컬 수신 포트는 열지 않는다. ffmpeg/ffprobe와 Windows 배터리 조회용 pwsh는 PATH에 있어야 한다.
+`server.bat`은 `.venv` 우선 Python으로 `app.worker`를 실행한다. 기본 브로커 주소는 ImageAnalyzer와 같은 EC2 주소이며 `OCR_BROKER_URL`로 바꾼다. `server_local.bat`은 127.0.0.1:3100을 지정하고 같은 런처를 부른다. `server_shutdown.bat`은 Windows에 2시간 후 종료를 예약하고 성공하면 동일 워커를 실행한다. 예약은 창을 닫아도 유지되며 `shutdown /a`로 취소한다. `worker.sh`는 환경변수 또는 코드 기본 localhost:3100을 사용한다. 모두 브로커에 나가는 요청만 보내고 로컬 수신 포트는 열지 않는다. Windows ffmpeg/ffprobe는 `.venv/Scripts` 또는 PATH에서, POSIX는 PATH에서 찾는다. Windows 배터리 조회용 pwsh는 PATH에 있어야 한다.
 
 ### `app/named_match.py`
 
