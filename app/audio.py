@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import wave
 from pathlib import Path
 
@@ -17,6 +19,15 @@ class FFmpegMissing(AudioReadError):
     pass
 
 
+def _binary(name: str) -> str:
+    """Prefer the verified pair installed alongside Windows venv Python."""
+    if os.name == "nt":
+        bin_dir = Path(sys.executable).parent
+        if all((bin_dir / f"{tool}.exe").is_file() for tool in ("ffmpeg", "ffprobe")):
+            return str(bin_dir / f"{name}.exe")
+    return name
+
+
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -27,7 +38,7 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
             check=False,
         )
     except FileNotFoundError as exc:
-        raise FFmpegMissing("ffmpeg/ffprobe is not on PATH") from exc
+        raise FFmpegMissing("ffmpeg/ffprobe is not available") from exc
     except subprocess.TimeoutExpired as exc:
         raise AudioReadError("ffmpeg timed out") from exc
 
@@ -35,7 +46,7 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
 def probe_duration(path: Path) -> float:
     completed = _run(
         [
-            "ffprobe",
+            _binary("ffprobe"),
             "-v",
             "error",
             "-show_entries",
@@ -63,7 +74,7 @@ def extract_mono(source: Path, dest: Path, sample_rate: int) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     completed = _run(
         [
-            "ffmpeg",
+            _binary("ffmpeg"),
             "-nostdin",
             "-hide_banner",
             "-loglevel",

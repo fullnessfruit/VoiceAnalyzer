@@ -13,10 +13,12 @@ a guarantee across unseen actors, microphones, music, or languages.
 
 ## Install and run
 
-Python 3.10 or 3.11 is preferred. Python 3.12 and newer is accepted with a warning. `ffmpeg` and
-`ffprobe` must be on `PATH` to analyze media. `install.bat` on Windows or `./install.sh` on POSIX
-creates or reuses `.venv`, installs `requirements.txt`, and prepares the shared
-`OCR_BROKER_SECRET`. It does not load model weights or start the worker.
+Python 3.10 or 3.11 is preferred. Python 3.12 and newer is accepted with a warning. `install.bat`
+on Windows or `./install.sh` on POSIX creates or reuses `.venv`, installs `requirements.txt`, and
+prepares the shared `OCR_BROKER_SECRET`. On Windows, the installer uses working `ffmpeg` and
+`ffprobe` already available or downloads a checksum-verified FFmpeg 9.0.2 essentials build into
+`.venv/Scripts`; no system `PATH` change is needed. On POSIX, both tools must be on `PATH`.
+The installer does not load model weights or start the worker.
 
 Run `server.bat` on Windows, `server_local.bat` for a local broker, or `./worker.sh` on POSIX.
 `server_shutdown.bat` schedules a Windows shutdown in two hours, then starts the same worker;

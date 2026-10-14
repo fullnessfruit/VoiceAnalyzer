@@ -46,14 +46,13 @@ echo Installing requirements.txt. This can take a while.
 "%PY%" -m pip install -r requirements.txt
 if errorlevel 1 goto :pip_fail
 
+echo Preparing ffmpeg and ffprobe for Windows media analysis
+"%PY%" -m app.ffmpeg_install
+if errorlevel 1 goto :ffmpeg_fail
+
 echo Preparing the shared ImageAnalyzer and VoiceAnalyzer authentication key
 "%PY%" app\shared_secret.py ensure
 if errorlevel 1 exit /b 1
-
-where ffmpeg >nul 2>&1
-if errorlevel 1 echo WARNING: ffmpeg is not on PATH. The worker cannot read media until ffmpeg is installed.
-where ffprobe >nul 2>&1
-if errorlevel 1 echo WARNING: ffprobe is not on PATH. Duration checks need ffprobe.
 
 echo.
 echo === Install complete ===
@@ -121,4 +120,8 @@ exit /b 1
 
 :pip_fail
 echo pip install failed
+exit /b 1
+
+:ffmpeg_fail
+echo ffmpeg/ffprobe setup failed. The worker cannot read media until this succeeds.
 exit /b 1
