@@ -1,4 +1,4 @@
-"""Keep the pinned voice-actor encoder and optional preprocessing models in one process."""
+"""Keep the pinned voice-actor encoder and VAD in one process."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ class ModelHub:
         self._device: str | None = None
         self._voice = None
         self._vad = None
-        self._demucs = None
 
     def device(self) -> str:
         if self._device is None:
@@ -70,20 +69,6 @@ class ModelHub:
 
                 self._vad = load_silero_vad()
             return self._vad
-
-    def demucs(self):
-        with self.lock:
-            if self._demucs is None:
-                import demucs.api
-
-                self._demucs = demucs.api.Separator(
-                    model=self.config.demucs_model,
-                    device=self.device(),
-                    shifts=self.config.demucs_shifts,
-                    split=True,
-                    progress=False,
-                )
-            return self._demucs
 
     def embed_many(self, pieces: list[np.ndarray]) -> np.ndarray:
         """Embed equally long mono 16 kHz windows in batches of eight."""

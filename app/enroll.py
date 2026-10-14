@@ -22,46 +22,16 @@ _CACHE_VERSION = "anime-va-3s-mean-v1"
 
 
 def list_speakers(config: Config) -> list[dict]:
-    return [{"speaker_id": name, "num_wavs": len(wavs)}
+    return [{"speaker_id": name, "num_samples": len(wavs)}
             for name, wavs in _reference_wavs(config).items()]
-
-
-def speaker_has_wavs(config: Config, speaker_id: str) -> bool:
-    return speaker_id in _reference_wavs(config, speaker_id)
-
-
-def enroll_speakers(config: Config, hub: ModelHub, speaker_id: str | None,
-                    source_wavs: list[Path] | None) -> dict:
-    """Force fresh embeddings; explicit file_paths also replace that actor's wavs."""
-    if source_wavs is not None:
-        if not speaker_id:
-            raise PathRejected(400, "speaker_id is required when file_paths is set")
-        if not source_wavs:
-            raise PathRejected(400, "file_paths is empty")
-        _replace_references(config, speaker_id, source_wavs)
-    available = _reference_wavs(config, speaker_id)
-    if speaker_id is not None and speaker_id not in available:
-        raise PathRejected(404, "speaker not enrolled")
-    work = config.work_dir / f"enroll-{uuid.uuid4().hex}"
-    work.mkdir(parents=True, exist_ok=True)
-    saved = []
-    try:
-        with hub.lock:
-            for name, wavs in available.items():
-                _embed_or_cache(config, hub, name, wavs, work / name, force=True)
-                saved.append({"speaker_id": name, "num_wavs": len(wavs),
-                              "model": "anime_va"})
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-    return {"speakers": saved}
 
 
 def load_enrollment(config: Config, hub: ModelHub, speaker_id: str, work: Path) -> Enrollment:
     """Load only the requested actor; caller owns hub.lock during inference."""
     available = _reference_wavs(config, speaker_id)
     if speaker_id not in available:
-        raise PathRejected(404, "speaker not enrolled")
-    return _embed_or_cache(config, hub, speaker_id, available[speaker_id], work, force=False)
+        raise PathRejected("speaker not enrolled")
+    return _embed_or_cache(config, hub, speaker_id, available[speaker_id], work)
 
 
 def embed_waveform(hub: ModelHub, samples: np.ndarray, sample_rate: int,
@@ -98,7 +68,7 @@ def _reference_wavs(config: Config, speaker_id: str | None = None) -> dict[str, 
         if not directory.is_dir():
             continue
         wavs = sorted((path for path in directory.iterdir()
-                       if path.is_file() and path.suffix.lower() == ".wav"),
+                       if path.is_file() and path.suffix.lower() in {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus"}),
                       key=lambda path: path.name.lower())
         if wavs:
             found[directory.name] = wavs
@@ -156,14 +126,13 @@ def _write_cache(path: Path, fingerprint: str, enrollment: Enrollment) -> None:
         staged.unlink(missing_ok=True)
 
 
-def _embed_or_cache(config: Config, hub: ModelHub, speaker_id: str, wavs: list[Path],
-                    work: Path, force: bool) -> Enrollment:
+def _embed_or_cache(config: Config, hub: ModelHub, speaker_id: str,
+                    wavs: list[Path], work: Path) -> Enrollment:
     fingerprint = _fingerprint(wavs)
     cache = _cache_path(config, speaker_id)
-    if not force:
-        found = _read_cache(cache, fingerprint)
-        if found is not None:
-            return found
+    found = _read_cache(cache, fingerprint)
+    if found is not None:
+        return found
     enrollment = _average_wavs(config, hub, wavs, work)
     _write_cache(cache, fingerprint, enrollment)
     return enrollment
@@ -179,39 +148,12 @@ def _average_wavs(config: Config, hub: ModelHub, wavs: list[Path], work: Path) -
                 extract_mono(wav, dest, config.sample_rate)
                 samples, sample_rate = read_mono_pcm16(dest)
             except FFmpegMissing as exc:
-                raise PathRejected(500, str(exc)) from exc
+                raise PathRejected(str(exc)) from exc
             except AudioReadError as exc:
-                raise PathRejected(400, f"cannot read media: {wav.name}") from exc
+                raise PathRejected(f"cannot read media: {wav.name}") from exc
             vector = embed_waveform(hub, samples, sample_rate, config.reference_chunk_sec)
             references.append(ReferenceEmbedding(wav.name, vector))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return Enrollment(average_embeddings([ref.vector for ref in references]),
                       tuple(references))
-
-
-def _replace_references(config: Config, speaker_id: str, sources: list[Path]) -> None:
-    staging = config.refs_dir / f".{speaker_id}.staging"
-    backup = config.refs_dir / f".{speaker_id}.bak"
-    dest = config.refs_dir / speaker_id
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    try:
-        for index, source in enumerate(sources):
-            shutil.copyfile(source, staging / f"{index:03d}.wav")
-        if backup.exists():
-            shutil.rmtree(backup)
-        if dest.exists():
-            dest.rename(backup)
-        staging.rename(dest)
-    except Exception:
-        if not dest.exists() and backup.exists():
-            backup.rename(dest)
-        raise
-    else:
-        if backup.exists():
-            shutil.rmtree(backup, ignore_errors=True)
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)

@@ -79,7 +79,7 @@ echo "Preparing the shared ImageAnalyzer and VoiceAnalyzer authentication key"
 "$VPY" app/shared_secret.py ensure
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "WARNING: ffmpeg is not on PATH. The server cannot read media until ffmpeg is installed." >&2
+  echo "WARNING: ffmpeg is not on PATH. The worker cannot read media until ffmpeg is installed." >&2
 fi
 if ! command -v ffprobe >/dev/null 2>&1; then
   echo "WARNING: ffprobe is not on PATH. Duration checks need ffprobe." >&2
@@ -89,8 +89,7 @@ echo ""
 echo "=== Install complete ==="
 echo ""
 echo "Next:"
-echo "  1. Put reference wavs in refs/<speaker_id>/"
-echo "  2. Put the media to search under data/"
-echo "  3. Start the server with ./server.sh"
+echo "  1. Put reference samples in data/<speaker_id>/"
+echo "  2. Start the broker worker with ./worker.sh"
 echo ""
 echo "Model weights are downloaded on first use. This script does not fetch them."
