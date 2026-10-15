@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import time
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import uuid
@@ -39,21 +40,40 @@ class _Download:
         self.remaining = max_bytes
         self.deadline = time.monotonic() + 900
         self.opener = build_opener(_MediaRedirect())
+        self.last_request = None
+        self.request_count = 0
+        self.received_bytes = 0
 
     def chunks(self, url: str):
         request = Request(validate_url(url), headers={"User-Agent": "VoiceAnalyzer"})
-        with self.opener.open(request, timeout=60) as response:
+        self.request_count += 1
+        self.last_request = {"url": url, "httpStatus": None, "contentLength": None,
+                             "receivedBytes": 0, "complete": False}
+        try:
+            response = self.opener.open(request, timeout=60)
+        except HTTPError as exc:
+            self.last_request.update(httpStatus=exc.code, contentLength=exc.headers.get("Content-Length"))
+            raise
+        with response:
             validate_url(response.url)
+            expected = response.headers.get("Content-Length")
+            expected = int(expected) if expected and expected.isdecimal() else None
+            self.last_request.update(url=response.url, httpStatus=response.status, contentLength=expected)
             while True:
                 if time.monotonic() > self.deadline:
                     raise PathRejected("media download timed out")
                 block = response.read(256 * 1024)
                 if not block:
                     break
+                self.received_bytes += len(block)
+                self.last_request["receivedBytes"] += len(block)
                 self.remaining -= len(block)
                 if self.remaining < 0:
                     raise PathRejected("media exceeds download size limit")
                 yield block
+            if expected is not None and self.last_request["receivedBytes"] != expected:
+                raise PathRejected("media download was truncated")
+            self.last_request["complete"] = True
 
     def playlist(self, url: str) -> str:
         parts = []
@@ -114,13 +134,28 @@ def downloaded_media(config: Config, url: str):
     folder = config.data_dir / ".incoming" / uuid.uuid4().hex
     folder.mkdir(parents=True)
     dest = folder / "media.bin"
+    download = _Download(config.max_bytes)
+    stage = "download"
     try:
-        download = _Download(config.max_bytes)
         urls = (_hls_segments(download, url) if urlsplit(url).path.endswith(".m3u8") else [url])
         with dest.open("wb") as output:
             for segment in urls:
                 for block in download.chunks(segment):
                     output.write(block)
-        yield resolve_media_path(str(dest), config)
+        stage = "input_validation"
+        media = resolve_media_path(str(dest), config)
+        stage = "analysis"
+        yield media
+    except Exception as exc:
+        diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
+        try:
+            file_bytes = dest.stat().st_size
+        except OSError:
+            file_bytes = None
+        diagnostics.update(stage=stage, request=download.last_request,
+                           requestCount=download.request_count, receivedBytes=download.received_bytes,
+                           fileBytes=file_bytes)
+        exc.diagnostics = diagnostics
+        raise
     finally:
         shutil.rmtree(folder, ignore_errors=True)

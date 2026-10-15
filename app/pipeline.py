@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.audio import AudioReadError, FFmpegMissing, extract_mono, read_mono_pcm16
+from app.audio import AudioReadError, FFmpegMissing, NoAudioStream, extract_mono, read_mono_pcm16
 from app.config import Config
 from app.enroll import load_enrollment
 from app.models import get_hub
@@ -27,6 +27,8 @@ def match_files_for_names(config: Config, media: Path, names: list[str]) -> list
         extracted = work / "audio.wav"
         try:
             extract_mono(media, extracted, config.sample_rate)
+        except NoAudioStream:
+            return [_payload(config, name, 0, False, None, [], "no_audio") for name in names]
         except FFmpegMissing as exc:
             raise PathRejected(str(exc)) from exc
         except AudioReadError as exc:

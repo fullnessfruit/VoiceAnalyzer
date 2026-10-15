@@ -10,11 +10,20 @@ from urllib.parse import quote
 from app.battery import BatteryShutdown
 from app.broker import Broker, BrokerError
 from app.config import load_config
+from app.diagnostics import error_details, error_summary
 from app.match_log import MatchAuditLog
 from app.named_match import match_requested, requested_speakers
 from app.shared_secret import require_secret
 
 logger = logging.getLogger("voiceanalyzer")
+
+
+def _record_failure(audit, event: str, **fields) -> None:
+    # A failed audit write must not prevent release of a failed broker job.
+    try:
+        audit.record(event, **fields)
+    except Exception as exc:
+        logger.error("voice error audit failed - jobId=%s error=%s", fields.get("jobId"), error_summary(exc))
 
 
 def run_job(config, job: dict, audit: MatchAuditLog) -> dict:
@@ -26,16 +35,27 @@ def run_job(config, job: dict, audit: MatchAuditLog) -> dict:
         return {"found": [], "matches": [], "skippedNames": skipped}
     matches = []
     errors = []
+    media_failures = []
     for url in dict.fromkeys(job.get("mediaUrls", [])):
+        media_matches = []
+        details = None
+        error = None
         try:
             result = match_requested(config, selected, url)
-            matches.extend({**item, "mediaUrl": url} for item in result["matches"])
+            media_matches = [{**item, "mediaUrl": url} for item in result["matches"]]
+            matches.extend(media_matches)
         except Exception as exc:
-            errors.append(f"{type(exc).__name__}: {exc}")
+            details = error_details(exc)
+            error = error_summary(exc)
+            errors.append(f"{url}: {error}")
+            media_failures.append({"mediaUrl": url, "causes": details})
         audit.record("voice_media_result", jobId=job["jobId"], postUrl=job.get("postUrl"),
-                     mediaUrl=url, matches=matches, errors=errors)
+                     mediaUrl=url, matches=media_matches, errors=[error] if error else [],
+                     **({"errorDetail": details} if details is not None else {}))
     if errors and not matches:
-        raise RuntimeError("; ".join(errors))
+        failure = RuntimeError(f"all {len(errors)} media inputs failed")
+        failure.diagnostics = {"mediaFailures": media_failures}
+        raise failure
     return {"found": list(dict.fromkeys(item["speaker_id"] for item in matches if item["present"])),
             "matches": matches, "skippedNames": skipped,
             "error": None, "warnings": errors}
@@ -55,6 +75,7 @@ def main():
     try:
         while True:
             job = None
+            stage = "claim"
             try:
                 if not verified:
                     status = broker.request("GET", "/status")
@@ -67,21 +88,28 @@ def main():
                     job = jobs[0]
                     started = time.monotonic()
                     audit.record("voice_job_started", jobId=job["jobId"], postUrl=job.get("postUrl"), names=job.get("names"))
+                    stage = "analysis"
                     payload = run_job(config, job, audit)
                     payload["elapsedMs"] = round((time.monotonic() - started) * 1000)
+                    stage = "result_upload"
                     broker.request("POST", f"/jobs/{quote(job['jobId'], safe='')}/result", payload)
                     audit.record("voice_job_finished", jobId=job["jobId"], **payload)
                     continue
             except Exception as exc:
-                audit.record("voice_job_error", jobId=job.get("jobId") if job else None, error=str(exc))
-                logger.error("voice worker failed - jobId=%s error=%s", job.get("jobId") if job else "-", str(exc).replace("\n", " "))
+                error = error_summary(exc)
+                _record_failure(audit, "voice_job_error", jobId=job.get("jobId") if job else None,
+                             workerId=worker_id, stage=stage, error=error, errorDetail=error_details(exc))
+                logger.error("voice worker failed - jobId=%s stage=%s error=%s", job.get("jobId") if job else "-", stage, error)
                 if job:
                     if isinstance(exc, BrokerError) and exc.status == 409:
                         continue
                     try:
-                        broker.request("POST", f"/jobs/{quote(job['jobId'], safe='')}/release", {})
+                        broker.request("POST", f"/jobs/{quote(job['jobId'], safe='')}/release", {"error": f"{stage}: {error}"})
+                        _record_failure(audit, "voice_job_released", jobId=job["jobId"], workerId=worker_id, error=error)
                     except Exception as release_error:
-                        logger.warning("voice release failed - error=%s", str(release_error).replace("\n", " "))
+                        _record_failure(audit, "voice_release_error", jobId=job["jobId"], workerId=worker_id,
+                                     error=error_summary(release_error))
+                        logger.warning("voice release failed - jobId=%s error=%s", job["jobId"], error_summary(release_error))
             time.sleep(interval)
     finally:
         battery.stopped.set()
