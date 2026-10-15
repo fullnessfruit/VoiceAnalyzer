@@ -80,7 +80,8 @@ A per-actor match in the broker result has the following shape:
 `score` is raw cosine against the **mean** reference. `reference` names the closest individual
 sample for inspection; it does not vote independently. `best` is the highest-scoring eligible
 window, including when it is below threshold. `segments` contains only passing windows and is
-empty when `present` is false. `reason` is `no_speech` if VAD found nothing,
+empty when `present` is false. `reason` is `no_audio` when the media has no audio track,
+`no_speech` if VAD found nothing,
 `insufficient_speech` if no full eligible three-second window exists, or `below_threshold` if
 eligible windows did not pass. These outcomes must not be counted as successful identity rejection
 in an evaluation without checking that analyzable speech existed.
