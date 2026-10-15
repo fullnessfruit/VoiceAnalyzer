@@ -59,7 +59,8 @@ LLM은 판정에 호출하지 않는다. AnnouncementAggregator는 공통 브로
 - 등록된 다른 성우와의 경쟁 마진을 사용하지 않는다. 등록 성우마다 독립적인 open-set 검사를
   하므로 두 이름이 같은 창에서 모두 통과할 가능성은 남는다. 코사인이 임계값 미만이면
   `below_threshold`, VAD가 비었으면 `no_speech`, VAD는 있으나 유효한 3초 창이 없으면
-  `insufficient_speech`다. 뒤의 두 결과는 화자 구별 성공으로 세지 않는다.
+  `insufficient_speech`다. 읽을 수 있는 영상에 음성 트랙 자체가 없으면 `no_audio`다.
+  `no_audio`, `no_speech`, `insufficient_speech`는 화자 구별 성공으로 세지 않는다.
 - 화자 분할·군집화·BGM 분리는 호출하지 않는다. 브로커 워커는 측정 때와 같은 원본 믹스를
   사용한다. 예전 다중 모델·분리 상태를 나타내던 응답 필드도 없다.
 - `best`는 점수를 계산한 창이 있으면 탈락 요청에도 최고 창을 넣는다. `segments`는 통과한
@@ -97,6 +98,12 @@ PCM을 만들고 `ModelHub.lock` 안에서 VAD, 참조 캐시, 임베딩, 이름
 수행한다. ffmpeg 추출은 락 밖이다. 파이프라인도 `finally`에서 작업 디렉터리를 지운다.
 디코딩·입력·모델 오류는 `present:false`로 바꾸지 않고 작업 오류로 브로커에 보고한다.
 `MatchAuditLog`는 job ID, 원본 포스트 URL, 미디어 URL과 결과·오류를 UTC 한 줄 로그에 남긴다.
+`voice_media_result`는 해당 URL 하나의 결과·오류만 기록한다. 앞 URL의 성공이나 실패를 다음
+URL의 행에 누적하지 않는다. `errorDetail`은 예외 종류·메시지·중첩 원인과 실패 단계,
+다운로드 HTTP 상태·Content-Length·수신 바이트·임시 파일 크기, 실패한 ffprobe/ffmpeg의
+실행 파일·버전·종료 코드·짧은 stderr/stdout을 보존한다. 성공 입력에는 버전 조회를 하지 않는다.
+모든 URL이 실패하면 이 상세 정보를 가진 작업 오류로 올리고, 일부 실패이면 성공한 입력의
+판정과 `warnings`를 함께 반환한다. 입력 오류를 화자 불일치로 바꾸지 않는다.
 참조 파일 변경은 내용 지문을 통해 다음 작업에서 자동으로 캐시를 갱신한다.
 
 ## 파일별 상세
@@ -127,15 +134,30 @@ YAML 루트와 하위 `thresholds`가 mapping인지 검증하고 임계값은 [-
 중간 종료 시에도 완료된 행을 남긴다. AnnouncementAggregator의 로그와 마찬가지로
 파일명과 행 시각 모두 UTC이며, 로컬 시간대로 변환하지 않는다.
 
+### `app/diagnostics.py`
+
+`one_line`은 오류 메시지의 개행을 정리하고 크기를 제한한다. `error_details`는 예외 체인의
+종류·메시지·`diagnostics`를 최대 6단계까지 보존하며 순환 참조를 중단한다. `error_summary`는
+같은 내용을 브로커 release의 2,000자 예산에 맞게 요약한다. 감사 로그에는 구조화된 상세를
+함께 남겨 브로커 요약에서 잘린 부분을 job ID·미디어 URL·시각으로 대조할 수 있다.
+
 ### `app/audio.py`
 
-`AudioReadError`와 하위 `FFmpegMissing`은 디코드 실패와 실행 파일 부재를 구분한다.
+`AudioReadError`와 하위 `FFmpegMissing`·`NoAudioStream`은 디코드 실패, 실행 파일 부재,
+읽을 수 있는 미디어의 음성 트랙 부재를 구분한다.
 `_binary`는 Windows에서 현재 Python 옆에 ffmpeg.exe·ffprobe.exe가 모두 있으면 그 쌍을
 우선 사용하고, 아니면 PATH를 사용한다. 설치한 가상환경의 도구를 사용자 PATH 수정 없이
 찾기 위한 선택이다.
-`_run`은 셸 없이 argv로 ffmpeg/ffprobe를 호출하고 한 시간 타임아웃을 둔다.
-`probe_duration`은 `format=duration`을 float로 읽어 음수를 거절한다.
+`_run`은 셸 없이 argv로 ffmpeg/ffprobe를 호출하고 한 시간 타임아웃을 둔다. 도구 출력의
+깨진 인코딩은 치환해 진단 자체의 디코딩 실패를 피한다. 도구 부재·실행 실패·타임아웃도
+`AudioReadError` 계열에 실행 정보를 담아 전달한다. `_tool_details`/`_read_error`는 실패한
+명령의 실행 파일·종료 코드·짧은 stderr/stdout을 만들고, `_tool_version`은 실패 시에만
+5초 한도로 버전을 조회해 프로세스 안에서 캐시한다.
+`probe_duration`은 `format=duration`을 float로 읽어 음수·NaN·무한대를 거절한다.
 `extract_mono`는 입력 형식과 관계없이 `-vn -ac 1 -ar 16000 pcm_s16le` WAV를 만든다.
+추출에 실패하면 ffprobe로 audio stream 인덱스를 확인한다. 스트림이 없다는 사실이 확인될 때만
+`NoAudioStream`을 내고, 진단 probe까지 실패하면 원래 ffmpeg 오류를 보존한다. 정상 입력에는
+추가 probe 비용이 없다.
 `read_mono_pcm16`은 우리 PCM WAV의 16-bit 스케일을 float로 읽고 다채널이면 평균한다.
 질의 고정 창은 샘플 인덱스로 직접 자른다.
 
@@ -198,8 +220,9 @@ Config를 무시한다. `RLock`이라 파이프라인이 락을 잡고 각 메�
 ### `app/pipeline.py`
 
 `match_files_for_names`는 ffmpeg 추출·VAD·질의 창 임베딩을 파일당 한 번만
-실행하고, 모델 락 안에서 이름별 참조 캐시와 `decide`만 반복한다. 추출 오류는 예외다. 3초 창이
-없으면 참조 모델을 열지 않는다. `finally`는 작업 디렉터리를 제거한다.
+실행하고, 모델 락 안에서 이름별 참조 캐시와 `decide`만 반복한다. 음성 트랙이 없는 입력은
+`no_audio` 결과로 끝내고 다른 추출 오류는 예외다. 3초 창이 없으면 참조 모델을 열지 않는다.
+`finally`는 작업 디렉터리를 제거한다.
 `_payload`는 `model`, `threshold`, `window_seconds`, `speech_window_count`와 판정·구간을
 담는다. 점수가 없으면
 `best`를 생략하고, 사유가 없으면 `reason`을 생략한다.
@@ -264,13 +287,25 @@ essentials ZIP을 내려받는다. `_download`는 크기를 제한하고 `_sha25
 
 `validate_url`과 `_MediaRedirect`는 최초 주소와 모든 리다이렉트를 HTTPS video.twimg.com, 기본 HTTPS 포트, 자격증명 없음으로 제한한다. `_Download.chunks`는 파일을 스트리밍하면서 누적 2 GiB와 전체 15분·소켓 60초 한도를 적용하고 `playlist`는 HLS 텍스트를 2 MiB로 제한한다. `_hls_segments`는 가장 높은 bitrate의 audio rendition을 우선하고 없으면 가장 높은 bandwidth의 영상 stream을 고른다. 완료된 비암호화·비-byte-range HLS만 받아 init+segment를 로컬에 순서대로 저장한다. 재귀 playlist 깊이도 제한한다. ffmpeg에 원격 URL을 넘기지 않는다.
 
-`downloaded_media`는 `data/.incoming/<UUID>/`에 다운로드하고 기존 길이·크기 검사를 적용한다. 성공·실패 모두 finally에서 이 임시 디렉터리를 지운다. 분석은 기존 `extract_mono`로 영상 트랙을 버리고 16kHz PCM을 만든다. 암호화/라이브/특수 byte-range HLS는 음성 부재가 아니라 명시적 처리 오류다.
+`_Download`는 마지막 HTTP 요청의 상태·Content-Length·수신 바이트와 전체 요청 수·수신량을
+보존한다. 명시된 Content-Length보다 짧게 끝난 응답은 잘린 다운로드로 거절한다. HLS 선택
+방식은 동일하며 전체 segment 목록을 로그에 쌓지 않는다.
+`downloaded_media`는 `data/.incoming/<UUID>/`에 다운로드하고 기존 길이·크기 검사를 적용한다.
+실패 시 `download`·`input_validation`·`analysis` 단계와 다운로드 진단·임시 파일 크기를
+원래 예외에 붙인 뒤 그대로 올린다. 성공·실패 모두 finally에서 이 임시 디렉터리를 지운다. 분석은 기존 `extract_mono`로 영상 트랙을 버리고 16kHz PCM을 만든다. 암호화/라이브/특수 byte-range HLS는 음성 부재가 아니라 명시적 처리 오류다.
 
 ### `app/broker.py`, `app/worker.py`
 
 `Broker.request`는 ImageAnalyzer와 같은 OCR1 canonical bytes와 `OCR_BROKER_SECRET`으로 요청·응답을 검증한다. HTTP 리다이렉트는 거절하고 30초 요청 한도·8 MiB 응답 한도를 둔다. `BrokerError`는 상태를 보존하되 인증되지 않은 상태 응답을 정상 완료로 취급하지 않는다.
 
-`worker.main`은 서명된 `/status`가 voice 종류를 지원하는지 먼저 확인하고 `/claim`에 `kinds:['voice']`, max=1을 보낸다. 다른 종류를 분석하지 않는다. `run_job`은 요청 이름 중 샘플이 있는 것만 각 미디어에 대조하고 통과 이름을 `found`, 이름별 결과를 `matches`로 돌려준다. 미등록 이름은 파일 다운로드도 하지 않는다. 결과 업로드 후 다음 작업을 즉시 받고, 빈 큐/연결 실패 때 `VOICE_WORKER_INTERVAL_MS`(60초) 뒤 다시 조회한다. 오류는 release하여 브로커의 1회 재시도 정책을 따르며 만료/다른 워커 완료에 따른 서명된 409는 정상 폐기로 처리한다. 모든 입력·판정·업로드 오류는 UTC 한 줄 감사 로그에 남는다.
+`worker.main`은 서명된 `/status`가 voice 종류를 지원하는지 먼저 확인하고 `/claim`에 `kinds:['voice']`, max=1을 보낸다. 다른 종류를 분석하지 않는다. `run_job`은 요청 이름 중 샘플이 있는 것만 각 미디어에 대조하고 통과 이름을 `found`, 이름별 결과를 `matches`로 돌려준다. 미등록 이름은 파일 다운로드도 하지 않는다. 결과 업로드 후 다음 작업을 즉시 받고, 빈 큐/연결 실패 때 `VOICE_WORKER_INTERVAL_MS`(60초) 뒤 다시 조회한다. 오류는 실제 예외·중첩 원인 요약을 `{error}`로 release하여 브로커의 1회 재시도 정책을 따르며 만료/다른 워커 완료에 따른 서명된 409는 정상 폐기로 처리한다. 모든 입력·판정·업로드 오류는 단계와 함께 UTC 한 줄 감사 로그에 남는다. 브로커는 각 시도의
+원인을 보존하므로 두 번째 실패로 종료돼도 일반적인 `failed twice`만 남지 않는다.
+`_record_failure`는 오류 감사 기록 자체가 실패해도 release를 진행하게 하며, release 성공과
+실패도 job ID로 기록한다.
+
+음성 트랙이 없는 미디어는 `pipeline.match_files_for_names`가 대상 이름마다 `present:false`,
+`reason:no_audio`, 점수·발화 창 없음으로 반환한다. 디코딩 실패나 모델 오류와 달리 확정된
+입력 상태이므로 브로커 작업을 재시도하지 않으며, 일치 실패를 측정한 음성 표본으로 세지 않는다.
 
 브로커는 OCR·image·voice 공통 한 포트다. voice job은 접수 후 1시간, result는 완료 후 1시간에 입출력 정리 대상이며 별도 heartbeat는 없다. 만료되거나 완료된 job은 새 결과로 부활하지 않는다. 워커가 꺼져 있을 때 확장이 켜거나 OpenAI로 대체하지 않는다. `VOICE_WORKER_ID`는 worker 표시 이름이고 인증 키는 별도 VOICE 키가 아닌 공통 `OCR_BROKER_SECRET`이다.
 
