@@ -1,6 +1,6 @@
 @echo off
 REM Remove the .venv created by install.bat.
-REM Leaves source, config.yaml, refs, data, and cache in place.
+REM Leaves source, config.yaml, data, sample, and cache in place.
 setlocal
 cd /d "%~dp0"
 
@@ -22,7 +22,7 @@ if exist ".venv\" goto :fail
 echo.
 echo === Uninstall complete ===
 echo Removed .venv.
-echo Source, config.yaml, refs, data, and cache were left in place.
+echo Source, config.yaml, data, sample, and cache were left in place.
 goto :eof
 
 :absent
