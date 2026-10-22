@@ -227,6 +227,9 @@ cache/**
 !cache/.gitkeep
 data/**
 !data/.gitkeep
+sample/**
+!sample/.gitkeep
+!sample/README.md
 
 refs/**/*.wav
 s5wMJDoZUyXedEIP.mp4

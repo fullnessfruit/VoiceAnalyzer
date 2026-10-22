@@ -29,7 +29,7 @@ first, then the Windows user environment or shared POSIX auth file. Installation
 existing key; it does not rotate it. In the extension, add names under the shared image/voice target list.
 
 `uninstall.bat` or `./uninstall.sh` removes only `.venv`. It preserves source, `config.yaml`,
-`data/`, caches, logs, and the shared key. The separate `delete-shared-secret.bat` and
+`data/`, `sample/`, caches, logs, and the shared key. The separate `delete-shared-secret.bat` and
 `delete-shared-secret.sh` are the explicit key-removal tools.
 
 ## Register voices
@@ -44,6 +44,18 @@ changes to sample contents or model identity. Older ECAPA/WeSpeaker caches are l
 The worker discovers a requested actor's samples on demand and rebuilds that actor's cache when
 sample contents change. No enrollment API is needed. Folder names must exactly match the extension
 targets. Added or replaced samples are picked up on the next job without restarting the worker.
+
+## Local test media
+
+Keep manual test inputs under `sample/<target_actor>/`. Unlike registration files in `data/`,
+these recordings are never scanned as reference voices or processed automatically. The actor
+folder names who the test is **about**; a recording marked `expected=absent` contains a voice
+to reject, not necessarily that actor's voice. `sample/manifest.csv` and each actor's
+`URL_목록.csv` record source URLs, labels, file hashes, and tested duration. They also distinguish
+videos with no audio from videos whose speech was not detected. The files are Git-ignored.
+The Nijigaku_movie test retains both its original MP4 and its separate original HLS audio
+without adding a converted PCM copy. Manual experiment scripts and score JSONs remain under
+`work/experiments/`.
 
 ## Process a broker job
 

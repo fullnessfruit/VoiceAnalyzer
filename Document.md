@@ -42,6 +42,10 @@ LLM은 판정에 호출하지 않는다. AnnouncementAggregator는 공통 브로
 `app.worker`가 작업을 가져와 결과를 돌려준다. Discord 판정·전송은 확장이 맡는다.
 워커는 수신 포트를 열지 않으며, `mediaUrls`는 내려받을 실제 공개 미디어 주소다.
 
+등록 참조 음성은 `data/<인물 이름>/`에 두고, 수동 테스트 입력은 `sample/<테스트 대상 인물>/`에
+둔다. `sample/`은 모델 등록·브로커 자동 분석 대상이 아니며 음성 파일만 보고 대상 이름을
+알기 어렵기 때문에 인물별로 묶는다. `data/.incoming/`은 작업 중에만 쓰는 다운로드 장소다.
+
 ## 판정과 전처리 결정
 
 - 유일한 판정 모델은 공개 Anime Speaker Embedding `va` 변형이다. 이 변형은 캐릭터가 아닌
@@ -121,6 +125,7 @@ Pydantic·Demucs는 워커 실행에 필요 없어 설치하지 않는다. READM
 `Config`는 frozen dataclass로 루트와 저장 디렉터리, 코사인 임계값, 장치,
 고정 오디오 상수를 담는다. `load_config(path=None)`는 YAML의 부모를 루트로 삼아
 `data/`, `work/`, `cache/`, `log/`를 만든다. 테스트가 임시 YAML을 주면 그 부모에만 만든다.
+`sample/`은 수동 테스트 자료라 설정·런타임 디렉터리에 포함하지 않고 저장소의 빈 틀에 둔다.
 YAML 루트와 하위 `thresholds`가 mapping인지 검증하고 임계값은 [-1,1]로 제한한다.
 옛 임계값 키와 `demucs`는 무시하며 각각 한 줄 경고를 낸다. 모델 ID·윈도 길이는 YAML로
 바뀌지 않아 측정한 처리 조건이 유지된다.
@@ -243,7 +248,8 @@ POSIX 게시에는 0600 임시 파일과 hard link를 써 동시 설치 때 기�
 3초 창의 50% 경계·미완성 꼬리, 내용 기반 캐시 지문, data 밖 경로·브로커 이름 거절,
 모의 모델을 통한
 파이프라인 결과·임시 디렉터리 정리를 검사한다. 공개 미디어와 실제 모델의 수동 재현
-실험은 Git 제외 `work/experiments/`에 JSON·로그로 따로 둔다.
+실험은 Git 제외 `work/experiments/`에 JSON·로그로 따로 둔다. 테스트 입력 원본은
+Git 제외 `sample/<대상 인물>/`에 두며 `data/`의 등록 자료로 세지 않는다.
 
 ### 실행·설치·제거 스크립트
 
@@ -253,7 +259,7 @@ Python으로 새 환경을 만들고 pip 의존성을 설치한다. 3.10 미만�
 준비하며, 도구 설치가 실패하면 전체 설치도 실패한다. POSIX는 ffmpeg/ffprobe 부재를
 경고한다. 가중치는 받지 않는다. 설치 뒤 `server.bat`/`worker.sh` 실행을 안내한다.
 더는 WeSpeaker용 Git 설치가 필요 없다.
-`uninstall.bat`/`uninstall.sh`는 링크가 아닌 `.venv`만 지우며 참조·미디어·캐시·로그·공유 키를
+`uninstall.bat`/`uninstall.sh`는 링크가 아닌 `.venv`만 지우며 `data/`, `sample/`, 캐시·로그·공유 키를
 남긴다. `delete-shared-secret.bat`/`.sh`는 명시적으로 공유 키만 지운다.
 
 ### `app/ffmpeg_install.py`
@@ -272,6 +278,14 @@ essentials ZIP을 내려받는다. `_download`는 크기를 제한하고 `_sha25
 ### 샘플과 실행
 
 이름 설정 파일은 없다. `data/大西亜玖璃/sample1.wav`처럼 인물별 폴더를 만들고 여러 연기 톤의 샘플을 넣는다. `Config.refs_dir`도 이 data 경로를 가리킨다. 폴더 이름이 확장 공통 대상 이름과 정확히 같아야 한다. 점으로 시작하는 `.incoming`·임시 폴더는 인물이 아니다. 샘플별 평균 판정·기존 캐시 검증은 그대로이며 브로커 작업이 요청한 이름만 지연 계산한다. 프로젝트 최상위의 `refs/` 폴더는 사용하지 않는다. 요청마다 대상 이름의 샘플 폴더를 다시 조회하므로 샘플 추가·이동은 워커 재시작 없이 다음 작업부터 반영된다.
+
+`sample/<인물 이름>/`은 그 인물을 찾거나 배제하려는 수동 테스트 입력이다. 등록 샘플과
+독립되어 `enroll._reference_wavs`가 보지 않는다. `sample/manifest.csv`와 인물별
+`URL_목록.csv`는 출처 URL, 라벨, 원본 파일 경로, SHA-256, 평가 길이를 기록한다.
+음성이 없는 영상은 파일 없이 URL과 상태만 남기고, 다른 화자가 함께 있는 영상은
+구간별 화자 정답을 모르면 `unverified_speaker_mix`로 둔다. 모델 점수만으로 정답을
+만들지 않는다. 원본 미디어만 보관하고 모델용 변환 PCM·잘라낸 음성은 실험 도구가 필요할
+때 만든다. Nijigaku_movie는 원본 MP4와 별도 HLS 오디오 M4A를 보존한다.
 
 `server.bat`은 `.venv` 우선 Python으로 `app.worker`를 실행한다. 기본 브로커 주소는 ImageAnalyzer와 같은 EC2 주소이며 `OCR_BROKER_URL`로 바꾼다. `server_local.bat`은 127.0.0.1:3100을 지정하고 같은 런처를 부른다. `server_shutdown.bat`은 Windows에 2시간 후 종료를 예약하고 성공하면 동일 워커를 실행한다. 예약은 창을 닫아도 유지되며 `shutdown /a`로 취소한다. `worker.sh`는 환경변수 또는 코드 기본 localhost:3100을 사용한다. 모두 브로커에 나가는 요청만 보내고 로컬 수신 포트는 열지 않는다. Windows ffmpeg/ffprobe는 `.venv/Scripts` 또는 PATH에서, POSIX는 PATH에서 찾는다. Windows 배터리 조회용 pwsh는 PATH에 있어야 한다.
 
