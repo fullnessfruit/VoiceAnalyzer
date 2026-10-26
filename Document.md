@@ -42,9 +42,10 @@ LLM은 판정에 호출하지 않는다. AnnouncementAggregator는 공통 브로
 `app.worker`가 작업을 가져와 결과를 돌려준다. Discord 판정·전송은 확장이 맡는다.
 워커는 수신 포트를 열지 않으며, `mediaUrls`는 내려받을 실제 공개 미디어 주소다.
 
-등록 참조 음성은 `data/<인물 이름>/`에 두고, 수동 테스트 입력은 `sample/<테스트 대상 인물>/`에
-둔다. `sample/`은 모델 등록·브로커 자동 분석 대상이 아니며 음성 파일만 보고 대상 이름을
-알기 어렵기 때문에 인물별로 묶는다. `data/.incoming/`은 작업 중에만 쓰는 다운로드 장소다.
+등록 참조 음성은 `data/<인물 이름>/`에 두고, 수동 테스트 입력은 정답에 따라
+`sample/<테스트 대상 인물>/`과 `sample/<테스트 대상 인물> 아님/`에 나눈다. 부재 대조군의
+실제 화자를 모르면 다른 사람의 이름으로 분류하지 않는다. `sample/`은 모델 등록·브로커
+자동 분석 대상이 아니다. `data/.incoming/`은 작업 중에만 쓰는 다운로드 장소다.
 
 ## 판정과 전처리 결정
 
@@ -115,7 +116,8 @@ URL의 행에 누적하지 않는다. `errorDetail`은 예외 종류·메시지�
 ### `config.yaml`, `requirements.txt`, `README.md`, `app/__init__.py`
 
 `config.yaml`은 사용자가 가진 설정 파일이고 위에 적힌 새 키만 유효하다. 의존성 파일은
-`anime_speaker_embedding==0.2.1`과 Silero 6.2.3을 포함하며, 구 ECAPA 직접 로드·WeSpeaker·
+`anime_speaker_embedding==0.2.1`, Silero 6.2.3, 인증서 사고 수정판
+`certifi>=2026.10.19`를 포함하며, 구 ECAPA 직접 로드·WeSpeaker·
 pyannote를 직접 설치하거나 scikit-learn 군집화 API를 호출하지 않는다. FastAPI·uvicorn·
 Pydantic·Demucs는 워커 실행에 필요 없어 설치하지 않는다. README는
 설치·브로커 작업·점수 의미를 설명한다. `app/__init__.py`는 패키지 docstring 외 동작이 없다.
@@ -249,7 +251,47 @@ POSIX 게시에는 0600 임시 파일과 hard link를 써 동시 설치 때 기�
 모의 모델을 통한
 파이프라인 결과·임시 디렉터리 정리를 검사한다. 공개 미디어와 실제 모델의 수동 재현
 실험은 Git 제외 `work/experiments/`에 JSON·로그로 따로 둔다. 테스트 입력 원본은
-Git 제외 `sample/<대상 인물>/`에 두며 `data/`의 등록 자료로 세지 않는다.
+Git 제외 `sample/<대상 인물>/` 또는 `sample/<대상 인물> 아님/`에 두며 `data/`의 등록 자료로 세지 않는다.
+
+### `work/experiments/` 수동 비교 도구
+
+`voice-redesign-20261008/report.md`가 수동 실험의 단일 통합 보고서다. 현재 재현 입력·점수는
+`full-rerun-20261023/`에 둔다. `benchmark_current.py`, `benchmark_legacy.py`,
+`benchmark_acoustic.py`는 고정 입력 SHA-256과 VAD 창을 확인한 뒤 각각 현행 성우 모델,
+비교 화자 모델, MFCC·파형 NCC의 구간별 원점수를 저장한다. `analyze.py`는 기존
+성우 제외 보정 임계값과 새 영상의 점수를 구분해 8개 길이 × 평균/개별 참조 × 3개 창 집계를
+다시 만든다. `compare_fusions.py`는 영상별 두 모델 AND/OR를, `compare_same_window_fusions.py`는
+같은 발화 창에서 두 모델이 모두 통과하는지 확인한다. 후자는 개별 참조 방식에서 동일한
+참조 WAV 인덱스까지 요구하며 오류로 점수가 없는 조건을 부재 판정으로 바꾸지 않는다.
+`prepare_holdout.py`는 이전 御子柴泉 공식 샘플과 질의 PCM의 SHA-256을 확인해 Windows
+경로만 바꾼 고정 입력 사본을 만든다. `evaluate_holdout_current.py`는 다른 다섯 성우의
+원본 자료로 정한 임계값을 이 별도 성우에 적용하고, 현행 VA의 0.38 판정도 따로 집계한다.
+
+`bgm-model-comparison/`은 동일한 원본 믹스·양성 2개·발화 있는 음성 1개를 별도 음원 분리기에
+넣는 수동 도구다. `run_remaining.py`는 완료 결과를 재사용하고 모델별 실행·실패·시간을 UTC
+JSONL 한 줄에 남긴다. `--stop-after-failure`는 한 모델의 사례가 실패하거나 제한 시간을 넘으면
+그 모델의 뒤 사례를 실행하지 않는다. `run_clearvoice.py`는 모델 기본 디코드 길이와 선택적인 분할 디코드
+길이를 결과에 기록한다. `score_stem_grid.py`는 분리 결과의 VAD를 다시 구해 현행 Anime VA의
+모든 8개 길이·2개 참조 정책 점수를 저장한다. `score_stem_other_models.py`는 동일한 분리
+음원의 3초 창에서 다른 화자 모델·MFCC·파형 NCC를 비교한다. `--method`는 이미 저장된
+나머지 분리 결과를 유지하면서 지정 모델의 스템만 추가 계산할 때 쓴다. `analyze_stem_grid.py`와
+`analyze_stem_cross.py`는 새 세 영상으로 임계값을 재학습하지 않고 기존 성우 제외 보정
+임계값을 적용한다. `validate_melband_all.py`의 `source_for`는 고정 쿼리 이름과 라벨에서
+공식 원본 또는 `sample/`의 양성·음성 원본 하나를 찾아 중복·누락을 거절한다. `main`은 그
+원본을 44.1 kHz stereo PCM16으로 변환해 유망한 MelBand RoFormer 보컬 분리에 넣고, 분리
+출력에서 VAD를 다시 실행한 뒤 이전과 동일한 WeSpeaker 참조·3초 창 점수를 저장한다. 고정
+입력 PCM과 모델 SHA-256을 확인하며 완료 쿼리는 원본·분리 출력의 SHA-256이 같을 때만
+재사용한다. `save`는 진행 중 JSON을 임시 파일로 기록한 뒤 교체해 중단 후 재시작 가능하게
+한다. `score_melband_all_b6.py`의 `main`은 이미 저장된 18개 MelBand 분리 음원의
+SHA-256과 고정 입력·모델 지문을 확인하고, WeSpeaker 실험과 똑같은 3초 VAD 창을
+ReDimNet2 B6으로 임베딩한다. 분리 모델을 다시 실행하지 않으며 완료 쿼리는 지문이
+맞을 때 재사용한다. `save`는 완료 쿼리마다 JSON을 임시 파일로 쓴 뒤 원자적으로 교체한다.
+`analyze_melband_all.py`의 `read`는 저장 JSON을 읽고 `main`은 `--model`로 고른 WeSpeaker
+또는 B6의 기존 성우 제외 임계값으로 분리 전후 판정을 비교해 영상별 CSV와 설정별 집계를
+만든다. 기본값은 WeSpeaker다. `retrospective_aguri`는 새 영상의 라벨까지 본 뒤 대상 성우
+점수의 양성 최저·음성 최고 사이에 임계값이 존재하는지만 별도로 기록하며 운영 임계값에
+적용하지 않는다. 미실행 쿼리를 따로 표시하고 원래 발화가 없던 음성은 기존 오검출률에
+포함하지 않는다. 저장된 분리 음원·점수는 운영 워커가 읽지 않는다.
 
 ### 실행·설치·제거 스크립트
 
@@ -279,13 +321,15 @@ essentials ZIP을 내려받는다. `_download`는 크기를 제한하고 `_sha25
 
 이름 설정 파일은 없다. `data/大西亜玖璃/sample1.wav`처럼 인물별 폴더를 만들고 여러 연기 톤의 샘플을 넣는다. `Config.refs_dir`도 이 data 경로를 가리킨다. 폴더 이름이 확장 공통 대상 이름과 정확히 같아야 한다. 점으로 시작하는 `.incoming`·임시 폴더는 인물이 아니다. 샘플별 평균 판정·기존 캐시 검증은 그대로이며 브로커 작업이 요청한 이름만 지연 계산한다. 프로젝트 최상위의 `refs/` 폴더는 사용하지 않는다. 요청마다 대상 이름의 샘플 폴더를 다시 조회하므로 샘플 추가·이동은 워커 재시작 없이 다음 작업부터 반영된다.
 
-`sample/<인물 이름>/`은 그 인물을 찾거나 배제하려는 수동 테스트 입력이다. 등록 샘플과
-독립되어 `enroll._reference_wavs`가 보지 않는다. `sample/manifest.csv`와 인물별
-`URL_목록.csv`는 출처 URL, 라벨, 원본 파일 경로, SHA-256, 평가 길이를 기록한다.
-음성이 없는 영상은 파일 없이 URL과 상태만 남기고, 다른 화자가 함께 있는 영상은
-구간별 화자 정답을 모르면 `unverified_speaker_mix`로 둔다. 모델 점수만으로 정답을
-만들지 않는다. 원본 미디어만 보관하고 모델용 변환 PCM·잘라낸 음성은 실험 도구가 필요할
-때 만든다. Nijigaku_movie는 원본 MP4와 별도 HLS 오디오 M4A를 보존한다.
+`sample/<인물 이름>/`은 그 인물이 있다고 지정한 수동 입력,
+`sample/<인물 이름> 아님/`은 부재로 지정한 대조 입력이다. 실제 화자 신원은 폴더 이름으로
+추측하지 않는다. 둘 다 등록 샘플과 독립되어 `enroll._reference_wavs`가 보지 않는다.
+`sample/manifest.csv`와 각 폴더의 `URL_목록.csv`는 출처 URL, 라벨, 원본 파일 경로,
+SHA-256, 평가 길이를 기록한다. 음성 트랙이 없는 mygirl_official·cocona_nonaka의 원본
+MP4는 부재 폴더에 보존하되 발화 음성의 음성 표본으로 세지 않는다. 다른 화자가 함께
+있는 영상은 구간별 화자 정답을 모르면 `unverified_speaker_mix`로 둔다. 모델 점수만으로
+정답을 만들지 않는다. 원본 미디어만 보관하고 모델용 변환 PCM·잘라낸 음성은 실험 도구가
+필요할 때 만든다. Nijigaku_movie는 원본 MP4와 별도 HLS 오디오 M4A를 보존한다.
 
 `server.bat`은 `.venv` 우선 Python으로 `app.worker`를 실행한다. 기본 브로커 주소는 ImageAnalyzer와 같은 EC2 주소이며 `OCR_BROKER_URL`로 바꾼다. `server_local.bat`은 127.0.0.1:3100을 지정하고 같은 런처를 부른다. `server_shutdown.bat`은 Windows에 2시간 후 종료를 예약하고 성공하면 동일 워커를 실행한다. 예약은 창을 닫아도 유지되며 `shutdown /a`로 취소한다. `worker.sh`는 환경변수 또는 코드 기본 localhost:3100을 사용한다. 모두 브로커에 나가는 요청만 보내고 로컬 수신 포트는 열지 않는다. Windows ffmpeg/ffprobe는 `.venv/Scripts` 또는 PATH에서, POSIX는 PATH에서 찾는다. Windows 배터리 조회용 pwsh는 PATH에 있어야 한다.
 
