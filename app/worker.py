@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from urllib.parse import quote
 
@@ -18,8 +19,8 @@ from app.shared_secret import require_secret
 logger = logging.getLogger("voiceanalyzer")
 
 
-def _record_failure(audit, event: str, **fields) -> None:
-    # A failed audit write must not prevent release of a failed broker job.
+def _record_event(audit, event: str, **fields) -> None:
+    # Audit failure must not stop broker recovery or release of a failed job.
     try:
         audit.record(event, **fields)
     except Exception as exc:
@@ -69,10 +70,12 @@ def main():
     interval = max(1, int(os.environ.get("VOICE_WORKER_INTERVAL_MS", "60000")) / 1000)
     audit = MatchAuditLog(config.log_dir)
     battery = BatteryShutdown.from_env()
-    battery.start()
-    logger.info("voice worker ready - broker=%s workerId=%s batteryThreshold=%s", broker.url, worker_id, battery.percent)
     verified = False
+    claim_error_pending = False
     try:
+        battery.start()
+        _record_event(audit, "voice_worker_started", workerId=worker_id)
+        logger.info("voice worker ready - broker=%s workerId=%s batteryThreshold=%s", broker.url, worker_id, battery.percent)
         while True:
             job = None
             stage = "claim"
@@ -83,6 +86,9 @@ def main():
                         raise RuntimeError("update the common broker: voice jobs are not supported")
                     verified = True
                 result = broker.request("POST", "/claim", {"workerId": worker_id, "max": 1, "kinds": ["voice"]})
+                if claim_error_pending:
+                    _record_event(audit, "voice_broker_recovered", workerId=worker_id)
+                    claim_error_pending = False
                 jobs = result.get("jobs", [])
                 if jobs:
                     job = jobs[0]
@@ -96,8 +102,10 @@ def main():
                     audit.record("voice_job_finished", jobId=job["jobId"], **payload)
                     continue
             except Exception as exc:
+                if job is None and stage == "claim":
+                    claim_error_pending = True
                 error = error_summary(exc)
-                _record_failure(audit, "voice_job_error", jobId=job.get("jobId") if job else None,
+                _record_event(audit, "voice_job_error", jobId=job.get("jobId") if job else None,
                              workerId=worker_id, stage=stage, error=error, errorDetail=error_details(exc))
                 logger.error("voice worker failed - jobId=%s stage=%s error=%s", job.get("jobId") if job else "-", stage, error)
                 if job:
@@ -105,14 +113,22 @@ def main():
                         continue
                     try:
                         broker.request("POST", f"/jobs/{quote(job['jobId'], safe='')}/release", {"error": f"{stage}: {error}"})
-                        _record_failure(audit, "voice_job_released", jobId=job["jobId"], workerId=worker_id, error=error)
+                        _record_event(audit, "voice_job_released", jobId=job["jobId"], workerId=worker_id, error=error)
                     except Exception as release_error:
-                        _record_failure(audit, "voice_release_error", jobId=job["jobId"], workerId=worker_id,
+                        _record_event(audit, "voice_release_error", jobId=job["jobId"], workerId=worker_id,
                                      error=error_summary(release_error))
                         logger.warning("voice release failed - jobId=%s error=%s", job["jobId"], error_summary(release_error))
             time.sleep(interval)
     finally:
         battery.stopped.set()
+        uncaught = sys.exc_info()[1]
+        reason = type(uncaught).__name__ if uncaught is not None else "normal"
+        fields = {"workerId": worker_id, "reason": reason}
+        if uncaught is not None:
+            fields["error"] = error_summary(uncaught)
+            fields["errorDetail"] = error_details(uncaught)
+        _record_event(audit, "voice_worker_stopped", **fields)
+        logger.info("voice worker stopped - workerId=%s reason=%s", worker_id, reason)
 
 
 if __name__ == "__main__":

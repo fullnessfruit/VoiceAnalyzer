@@ -1,4 +1,4 @@
-"""Cache every performance separately and its equal-weight voice-actor mean."""
+"""Cache each registered performance as a separate speaker embedding."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from pathlib import Path
 import numpy as np
 
 from app.audio import AudioReadError, FFmpegMissing, extract_mono, read_mono_pcm16
-from app.config import Config, MODEL_SHA256
+from app.config import Config, WESPEAKER_SHA256
 from app.models import ModelHub
 from app.paths import PathRejected
 from app.scoring import Enrollment, ReferenceEmbedding, average_embeddings
 
 logger = logging.getLogger("voiceanalyzer")
-_CACHE_VERSION = "anime-va-3s-mean-v1"
+_CACHE_VERSION = "wespeaker-3s-any-top3-v1"
 
 
 def list_speakers(config: Config) -> list[dict]:
@@ -76,7 +76,7 @@ def _reference_wavs(config: Config, speaker_id: str | None = None) -> dict[str, 
 
 
 def _fingerprint(wavs: list[Path]) -> str:
-    digest = hashlib.sha256((_CACHE_VERSION + MODEL_SHA256).encode())
+    digest = hashlib.sha256((_CACHE_VERSION + WESPEAKER_SHA256).encode())
     for path in wavs:
         digest.update(path.name.encode("utf-8"))
         digest.update(b"\0")
@@ -88,7 +88,7 @@ def _fingerprint(wavs: list[Path]) -> str:
 
 
 def _cache_path(config: Config, speaker_id: str) -> Path:
-    return config.cache_dir / "enroll_anime_va_v1" / f"{speaker_id}.npz"
+    return config.cache_dir / "enroll_wespeaker_v1" / f"{speaker_id}.npz"
 
 
 def _read_cache(path: Path, fingerprint: str) -> Enrollment | None:
@@ -100,13 +100,12 @@ def _read_cache(path: Path, fingerprint: str) -> Enrollment | None:
                 return None
             names = [str(name) for name in data["names"]]
             vectors = np.asarray(data["vectors"], dtype=np.float64)
-            mean = np.asarray(data["mean"], dtype=np.float64)
-            if not names or vectors.shape != (len(names), 192) or mean.shape != (192,):
+            if not names or vectors.shape != (len(names), 256):
                 return None
-            if not np.isfinite(vectors).all() or not np.isfinite(mean).all():
+            if not np.isfinite(vectors).all() or np.any(np.linalg.norm(vectors, axis=1) == 0):
                 return None
-            return Enrollment(mean, tuple(ReferenceEmbedding(name, vector)
-                                          for name, vector in zip(names, vectors)))
+            return Enrollment(tuple(ReferenceEmbedding(name, vector)
+                                    for name, vector in zip(names, vectors)))
     except Exception as exc:
         logger.error("ignoring unreadable enrollment cache - path=%s error=%r", path, exc)
         return None
@@ -119,8 +118,7 @@ def _write_cache(path: Path, fingerprint: str, enrollment: Enrollment) -> None:
         with staged.open("wb") as stream:
             np.savez(stream, fingerprint=np.array(fingerprint),
                      names=np.asarray([ref.name for ref in enrollment.references]),
-                     vectors=np.stack([ref.vector for ref in enrollment.references]).astype(np.float32),
-                     mean=enrollment.mean.astype(np.float32))
+                     vectors=np.stack([ref.vector for ref in enrollment.references]).astype(np.float32))
         os.replace(staged, path)
     finally:
         staged.unlink(missing_ok=True)
@@ -133,12 +131,12 @@ def _embed_or_cache(config: Config, hub: ModelHub, speaker_id: str,
     found = _read_cache(cache, fingerprint)
     if found is not None:
         return found
-    enrollment = _average_wavs(config, hub, wavs, work)
+    enrollment = _embed_wavs(config, hub, wavs, work)
     _write_cache(cache, fingerprint, enrollment)
     return enrollment
 
 
-def _average_wavs(config: Config, hub: ModelHub, wavs: list[Path], work: Path) -> Enrollment:
+def _embed_wavs(config: Config, hub: ModelHub, wavs: list[Path], work: Path) -> Enrollment:
     work.mkdir(parents=True, exist_ok=True)
     references = []
     try:
@@ -155,5 +153,4 @@ def _average_wavs(config: Config, hub: ModelHub, wavs: list[Path], work: Path) -
             references.append(ReferenceEmbedding(wav.name, vector))
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return Enrollment(average_embeddings([ref.vector for ref in references]),
-                      tuple(references))
+    return Enrollment(tuple(references))

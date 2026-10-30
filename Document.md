@@ -49,28 +49,32 @@ LLM은 판정에 호출하지 않는다. AnnouncementAggregator는 공통 브로
 
 ## 판정과 전처리 결정
 
-- 유일한 판정 모델은 공개 Anime Speaker Embedding `va` 변형이다. 이 변형은 캐릭터가 아닌
-  성우를 묶도록 학습된 ECAPA 계열이지만, 이 모델의 점수를 일반 SpeechBrain ECAPA 점수로
-  부르지 않는다. Hugging Face 저장소·revision·가중치 SHA-256을 `app/config.py`에 고정한다.
-  가중치는 처음 추론할 때 받고 SHA와 모델 state key를 검증한다.
-- ffmpeg가 입력을 16 kHz mono PCM16으로 만든다. Silero VAD는 최소 250 ms 발화와 0 ms pad로
-  발화 범위를 구한다. 파일 시작부터 3초 비중첩 창을 만들고 마지막 불완전 창은 버린다. VAD가
+- ffmpeg가 입력을 16 kHz mono PCM16으로 만든 뒤 `demucs-infer`의 `htdemucs`로 보컬을 분리한다.
+  입력은 16 kHz mono 텐서이고 `shifts=0`, `split=True`다. 보컬 스템을 먼저 44.1 kHz PCM16,
+  다시 ffmpeg로 16 kHz mono PCM16으로 만들어 수동 비교의 처리 경로를 재현한다. 분리 실패는
+  원본 믹스 판정으로 바꾸지 않고 작업 오류로 올린다. Demucs 체크포인트는 라이브러리가
+  SHA-256을 검증하며 설치 때 받지 않는다.
+- WeSpeaker `english`(VoxCeleb ResNet221_LM)의 개별 참조 코사인으로 판정한다. 모델
+  체크포인트 SHA-256을 로드 전에 검증한다. `Speaker.cosine_similarity`는 raw cosine을
+  `(cos+1)/2`로 바꾸므로 호출하지 않는다. 이 모델도 첫 요청에서 가중치를 받는다.
+- Silero VAD는 분리한 보컬의 최소 250 ms 발화와 0 ms pad로 발화 범위를 구한다. 파일 시작부터
+  3초 비중첩 창을 만들고 마지막 불완전 창은 버린다. VAD가
   창의 절반 이상을 덮은 창만 모델에 넣는다. 3초 내내 한 화자가 발화한다는 가정은 없다.
 - 참조 WAV마다 전체를 임베딩한다. 30초 초과 WAV는 30초 비중첩 창 임베딩의 평균으로 한
-  벡터가 된다. 각 참조 벡터를 L2 정규화해 동일 가중치로 평균하고 다시 정규화한다. 질의
-  창과 그 평균 참조의 raw cosine이 판정 점수다. 기본 임계값 0.38은 수동 다성우 비교에서
-  고른 잠정 값이며 확률이 아니다. 개별 참조는 가장 가까운 예시 이름 표시용이지 독립 OR
-  투표가 아니다.
+  벡터가 된다. 각 질의 창을 모든 참조와 따로 비교해 그 창의 최대 raw cosine과 해당 참조를
+  고른다. 창 점수 상위 3개의 평균(창이 적으면 있는 만큼)이 영상 점수다. 기본 임계값
+  `0.4771964776614425`는 다른 4명 성우의 보존 점수로 보정한 잠정 값이다. 방법 선택 자체가
+  현재 사례를 본 뒤 이뤄졌으므로 새 음성에 대한 독립 성능을 보장하지 않으며 확률이 아니다.
 - 등록된 다른 성우와의 경쟁 마진을 사용하지 않는다. 등록 성우마다 독립적인 open-set 검사를
   하므로 두 이름이 같은 창에서 모두 통과할 가능성은 남는다. 코사인이 임계값 미만이면
   `below_threshold`, VAD가 비었으면 `no_speech`, VAD는 있으나 유효한 3초 창이 없으면
   `insufficient_speech`다. 읽을 수 있는 영상에 음성 트랙 자체가 없으면 `no_audio`다.
   `no_audio`, `no_speech`, `insufficient_speech`는 화자 구별 성공으로 세지 않는다.
-- 화자 분할·군집화·BGM 분리는 호출하지 않는다. 브로커 워커는 측정 때와 같은 원본 믹스를
-  사용한다. 예전 다중 모델·분리 상태를 나타내던 응답 필드도 없다.
-- `best`는 점수를 계산한 창이 있으면 탈락 요청에도 최고 창을 넣는다. `segments`는 통과한
-  창만 시작 시각순으로 넣는다. `best.score`와 `segments[].score`는 같은 평균 참조 코사인이다.
-  `reference`는 해당 창에 가장 가까운 개별 WAV 이름이다.
+- 화자 분할·군집화는 호출하지 않는다. 같은 창이 여러 화자를 포함할 가능성은 남는다.
+- `best`는 점수를 계산한 창이 있으면 탈락 요청에도 최고 창을 넣는다. `best.score`는 그 창의
+  개별 참조 최고 cosine, `best.aggregate_score`는 임계값과 비교하는 상위 3창 평균이다.
+  `segments`는 판정에 기여한 최대 3개 창을 시작 시각순으로 넣으며 탈락해도 남긴다.
+  `reference`는 그 창에서 최고 점수를 낸 WAV 이름이다.
 
 ## 고정값과 설정
 
@@ -81,16 +85,17 @@ LLM은 판정에 호출하지 않는다. AnnouncementAggregator는 공통 브로
 | 같은 파일 | `SAMPLE_RATE`, `WINDOW_SEC` | 16000 Hz, 3.0초. 참조·질의·VAD가 공유 |
 | 같은 파일 | `MIN_SPEECH_FRACTION`, `VAD_MIN_SPEECH_MS` | 0.5, 250 ms |
 | 같은 파일 | `REFERENCE_CHUNK_SEC` | 30초, 비중첩. 0.5초 미만 마지막 조각은 폐기 |
-| 같은 파일 | `MODEL_REPO`, `MODEL_REVISION`, `MODEL_SHA256` | 공식 `litagin/anime_speaker_embedding_by_va_ecapa_tdnn_groupnorm`, revision `1677c9702cca7aca7dc5a74b3c76f3c8b05969b7`, SHA-256 `41d5ad6b5c758a03e46ab53388f42394f40bf115aa9d9df25d4adff6e21072ef` |
-| 같은 파일 | `DEFAULT_COSINE_MIN` | 0.38. `thresholds.voice_min`이 없을 때 사용 |
+| 같은 파일 | `WESPEAKER_MODEL`, `WESPEAKER_SHA256` | `english`, VoxCeleb ResNet221_LM SHA-256 `47d76239f1e865b273e31e30f691959061ff6565ed6c4e7be9639a65d9662eb5` |
+| 같은 파일 | `DEMUCS_MODEL`, `DEMUCS_SHA256` | `htdemucs`, 체크포인트 SHA-256 `8726e21a993978c7ba086d3872e7608d7d5bfca646ca4aca459ffda844faa8b4` |
+| 같은 파일 | `DEFAULT_TOP3_MIN`, `TOP_WINDOW_COUNT` | `0.4771964776614425`, 3. `thresholds.wespeaker_top3_min` 결측 시 기본 |
 | `app/models.py` | auto GPU 조건 | 사용 가능 CUDA 메모리가 2 GiB 이상일 때만 GPU, 아니면 CPU |
-| 같은 파일 | 모델 추론 batch | 동일 길이 창 8개씩, CPU torch thread는 최대 8개 |
+| 같은 파일 | 모델 추론 | WeSpeaker는 창마다 호출, CPU torch thread는 최대 4개 |
 
 `config.yaml`은 사용자 파일이라 기존 내용을 자동으로 바꾸지 않는다. 현재 파일의
-`thresholds.ecapa_min`, `wespeaker_min`, `margin`, `clustering.*`, `models.*`는 새 판정이 읽지
+`thresholds.ecapa_min`, `wespeaker_min`, `margin`, `voice_min`, `clustering.*`, `models.*`는 새 판정이 읽지
 않는다. 오래된 임계값 키는 기동 때 한 줄 경고로 알린다. 유효한 재설정 키는
-`thresholds.voice_min`, `device`다. 기존 `demucs` 설정도 사용하지 않고 기동 때 한 줄
-경고한다. `device`는 `auto`, `cpu`, `cuda` 또는 torch가 받는 명시적 장치 문자열이며
+`thresholds.wespeaker_top3_min`, `device`다. 기존 `demucs` 설정은 고정된 `htdemucs`에
+적용하지 않고 기동 때 한 줄 경고한다. `device`는 `auto`, `cpu`, `cuda` 또는 torch가 받는 명시적 장치 문자열이며
 명시적 CUDA 실패는 숨기지 않는다.
 
 ## 작업 경로와 잠금
@@ -99,8 +104,11 @@ LLM은 판정에 호출하지 않는다. AnnouncementAggregator는 공통 브로
 `named_match.match_requested`를 호출한다. 대상 이름이 없으면 다운로드·모델 추론을 생략한다.
 `downloaded_media`는 HTTPS `video.twimg.com` 입력을 `data/.incoming/`에 받은 뒤 경로·크기·길이를
 검사하고 `finally`에서 입력 디렉터리를 지운다. `pipeline.match_files_for_names`는 작업 UUID 아래
-PCM을 만들고 `ModelHub.lock` 안에서 VAD, 참조 캐시, 임베딩, 이름별 점수 판정을
-수행한다. ffmpeg 추출은 락 밖이다. 파이프라인도 `finally`에서 작업 디렉터리를 지운다.
+PCM을 만들고 `ModelHub.lock` 안에서 보컬 분리, VAD, 참조 캐시, 임베딩, 이름별 점수 판정을
+수행한다. 최초 입력의 ffmpeg 추출은 락 밖이고 보컬 스템의 ffmpeg 재변환은 락 안이다.
+파이프라인도 `finally`에서 작업 디렉터리를 지운다.
+3시간 입력 제한은 읽기 허용 상한일 뿐 처리 시간 보장이 아니다. 분리는 전체 파일을 대상으로
+실행하고 브로커 작업의 1시간 만료를 갱신하지 않으므로 긴 입력은 완료 전에 만료될 수 있다.
 디코딩·입력·모델 오류는 `present:false`로 바꾸지 않고 작업 오류로 브로커에 보고한다.
 `MatchAuditLog`는 job ID, 원본 포스트 URL, 미디어 URL과 결과·오류를 UTC 한 줄 로그에 남긴다.
 `voice_media_result`는 해당 URL 하나의 결과·오류만 기록한다. 앞 URL의 성공이나 실패를 다음
@@ -113,23 +121,25 @@ URL의 행에 누적하지 않는다. `errorDetail`은 예외 종류·메시지�
 
 ## 파일별 상세
 
-### `config.yaml`, `requirements.txt`, `README.md`, `app/__init__.py`
+### `config.yaml`, `requirements.txt`, `requirements-wespeaker.txt`, `README.md`, `app/__init__.py`
 
-`config.yaml`은 사용자가 가진 설정 파일이고 위에 적힌 새 키만 유효하다. 의존성 파일은
-`anime_speaker_embedding==0.2.1`, Silero 6.2.3, 인증서 사고 수정판
-`certifi>=2026.10.19`를 포함하며, 구 ECAPA 직접 로드·WeSpeaker·
-pyannote를 직접 설치하거나 scikit-learn 군집화 API를 호출하지 않는다. FastAPI·uvicorn·
-Pydantic·Demucs는 워커 실행에 필요 없어 설치하지 않는다. README는
+`config.yaml`은 사용자가 가진 설정 파일이고 위에 적힌 새 키만 유효하다. `requirements.txt`는
+고정 Git revision `a8552bb9da29a56018ae2f1828d360cc60830b54`의 `demucs-infer` 4.4.0,
+Silero 6.2.3, `soundfile`, `requests`,
+`certifi>=2026.10.19`를 포함한다. `requirements-wespeaker.txt`는 고정 Git revision의
+`wespeaker` 0.0.1(`9fecd6cb4f47475d01761d87c826298dff4ef18c`)만 담고 설치 스크립트가 `--no-deps`로 설치한다. 공식 WeSpeaker의 일반
+의존성에는 현재 추론 경로가 쓰지 않는 ASR·다이어리제이션 패키지가 있어서 제외한다.
+`app.wespeaker_runtime`이 필요한 모델 파일과 fbank 경로만 사용한다. FastAPI·uvicorn·Pydantic은 설치하지 않는다. README는
 설치·브로커 작업·점수 의미를 설명한다. `app/__init__.py`는 패키지 docstring 외 동작이 없다.
 
 ### `app/config.py`
 
-`Config`는 frozen dataclass로 루트와 저장 디렉터리, 코사인 임계값, 장치,
+`Config`는 frozen dataclass로 루트와 저장 디렉터리, 상위 3창 평균 cosine 임계값, 장치,
 고정 오디오 상수를 담는다. `load_config(path=None)`는 YAML의 부모를 루트로 삼아
 `data/`, `work/`, `cache/`, `log/`를 만든다. 테스트가 임시 YAML을 주면 그 부모에만 만든다.
 `sample/`은 수동 테스트 자료라 설정·런타임 디렉터리에 포함하지 않고 저장소의 빈 틀에 둔다.
 YAML 루트와 하위 `thresholds`가 mapping인지 검증하고 임계값은 [-1,1]로 제한한다.
-옛 임계값 키와 `demucs`는 무시하며 각각 한 줄 경고를 낸다. 모델 ID·윈도 길이는 YAML로
+옛 임계값 키와 `demucs`는 무시하며 각각 한 줄 경고를 낸다. 모델 ID·창 길이는 YAML로
 바뀌지 않아 측정한 처리 조건이 유지된다.
 
 ### `app/match_log.py`
@@ -180,13 +190,15 @@ YAML 루트와 하위 `thresholds`가 mapping인지 검증하고 임계값은 [-
 
 ### `app/scoring.py`
 
-`ReferenceEmbedding`은 한 WAV 이름·벡터, `Enrollment`는 개별 벡터들과 평균,
-`WindowEmbedding`은 한 질의 창 시각·벡터, `MatchDecision`은 판정과 응답용 최고·통과
+`ReferenceEmbedding`은 한 WAV 이름·벡터, `Enrollment`는 개별 벡터들,
+`WindowEmbedding`은 한 질의 창 시각·벡터, `MatchDecision`은 판정과 응답용 최고·기여
 창을 담는다. `l2_normalize`/`cosine`은 영벡터를 0 방향/0 점수로 처리하고 차원 불일치는
 오류다. `average_embeddings`는 각 입력을 정규화한 뒤 평균·재정규화하며 빈 목록은 오류다.
-`decide`는 각 창을 평균 참조와 비교하고 최고 점수(동점이면 이른 창)를 `best`로 선택한다.
-실제 부동소수 코사인으로 임계값을 검사한 뒤 응답에서만 소수 네 자리로 반올림한다.
-각 창과 가장 유사한 개별 참조 이름은 설명용이다. `segments`는 통과한 창만 반환한다.
+`decide`는 각 창에서 개별 참조 cosine의 최대값을 선택하고, 상위 3창의 비반올림 평균으로
+임계값을 검사한다. 창이 1~2개면 그 창 모두를 평균한다. 동점 창은 이른 시각이 앞서며,
+같은 창에서 동점 참조는 등록 순서가 앞선 쪽을 택한다. `best`에는 최고 창 점수와
+판정 평균을 함께 넣고, `segments`는 판정에 기여한 창을 반환한다. 표시용 창 점수는
+소수 4자리, 판정 평균은 6자리로 반올림하지만 판정 자체는 원점수다.
 
 ### `app/voice_activity.py`
 
@@ -198,13 +210,30 @@ YAML 루트와 하위 `thresholds`가 mapping인지 검증하고 임계값은 [-
 ### `app/models.py`
 
 `ModelHub.__init__`은 락과 미로드 상태만 만든다. `device`는 처음 호출의 auto 결정을
-프로세스 동안 고정하고 선택을 한 줄 기록한다. `voice`는 public Hugging Face checkpoint를
-정확한 revision으로 받아 SHA-256 확인 후 AnimeSpeakerEmbedding `va`를 eval 상태로 열고
-strict state-key 검사를 한다. 로드 실패는 요청 실패로 올라가며 다른 모델로 조용히 대체하지
-않는다. `vad`는 Silero를 필요할 때만 로드한다.
-`embed_many`는 동일 길이의 비어 있지 않은 16 kHz float 창을 8개씩 텐서로 추론하고
-192차원·finite·비영벡터를 확인해 정규화한다. `get_hub`는 전역 하나를 만들고 이후 다른
+프로세스 동안 고정하고 선택을 한 줄 기록한다. `speaker`는
+`app.wespeaker_runtime.load_english`로 필요한 ResNet 경로만 지연 로드한다.
+내부 VAD는 실행하지 않는다. `separator`는 저장소 cache 경로의
+`htdemucs`를 `shifts=0`, `split=True`로 지연 로드한다. 각 모델의 로드 실패는 작업 오류다.
+`separate_vocals`는 보컬 스템을 PCM16으로 저장하고 ffmpeg로 재변환해 수동 실험의
+양자화·리샘플링 순서를 보존한다. `vad`는 Silero를 필요할 때만 로드한다.
+`embed_many`는 각 float 파형을 clip→32767배→int16 절단→float32 `[1,T]`로 만들어
+WeSpeaker에 넣는다. torchaudio 정규화 값 그대로 넣으면 fbank 에너지가 맞지 않는다.
+256차원·finite·비영벡터를 확인해 정규화한다. `get_hub`는 전역 하나를 만들고 이후 다른
 Config를 무시한다. `RLock`이라 파이프라인이 락을 잡고 각 메서드에 재진입할 수 있다.
+
+### `app/wespeaker_runtime.py`
+
+공식 `wespeaker`의 최상위 import는 사용하지 않는 S3PRL 프런트엔드와 화자 분할까지
+로드한다. 이 경로가 현재 torchaudio와 충돌하므로 `load_english`는 설치된 패키지의
+`direct_url.json` Git commit을 확인하고 파일 위치를 찾는다. `_hub`는 공개 영어 가중치
+다운로더 파일만 로드한다. `_resnet221`은 namespace package를 마련해 ResNet과 필요한
+pooling 모듈만 불러온다. 그 경로에는 사용하지 않는 ASR·S3PRL·UMAP import가 없다.
+`WESPEAKER_HOME`은 프로세스 환경이 없으면 `cache/models/wespeaker`로 두고, 받은
+`avg_model.pt` SHA-256을 확인한 뒤 `weights_only=True`로 연다. 모델은 영어 체크포인트의
+ResNet221 인자를 고정해 만들고 projection 외 다른 state key 불일치를 거절한다.
+`EnglishSpeaker.extract_embedding_from_pcm`은 라이브러리와 같은 hamming 80-bin fbank,
+25 ms frame, 10 ms hop, 시간축 CMN, 모델 forward를 사용한다. 입력은 위 `embed_many`가
+만든 int16 크기 float32이고 `sample_rate`는 16 kHz여야 한다.
 
 ### `app/enroll.py`
 
@@ -214,23 +243,24 @@ Config를 무시한다. `RLock`이라 파이프라인이 락을 잡고 각 메�
 
 `embed_waveform`은 `_windows`로 30초 비중첩 조각을 만들고 조각 평균을 하나의 참조
 벡터로 만든다. `_windows`는 이미 조각이 있으면 0.5초 미만 꼬리만 버린다.
-`_fingerprint`는 모델 SHA·캐시 버전과 정렬된 WAV 이름·크기·실제 바이트를 SHA-256으로
+`_fingerprint`는 WeSpeaker SHA·캐시 버전과 정렬된 WAV 이름·크기·실제 바이트를 SHA-256으로
 묶는다. mtime만 바뀌어도 내용이 같으면 새 임베딩을 요구하지 않는다.
-`_cache_path`는 기존 캐시를 덮지 않는 `cache/enroll_anime_va_v1/{id}.npz`다.
-`_read_cache`는 지문·이름 수·192차원·finite를 검사하고 손상은 로그 후 캐시 미스로 본다.
+`_cache_path`는 기존 캐시를 덮지 않는 `cache/enroll_wespeaker_v1/{id}.npz`다.
+`_read_cache`는 지문·이름 수·256차원·finite·비영벡터를 검사하고 손상은 로그 후 캐시 미스로 본다.
 `_write_cache`는 임시 npz를 완성한 뒤 `os.replace`로 게시한다.
-`_embed_or_cache`는 지문이 일치하면 캐시를 쓰고, 아니면 `_average_wavs`를 호출한다.
-`_average_wavs`는 각 소스를 ffmpeg로 임시 PCM에 옮겨 벡터를 얻고, 파일별 벡터를 같은
-가중치로 평균한다. ffmpeg 부재와 파일별 디코드 실패는 정상 판정으로 바꾸지 않고 예외를
+`_embed_or_cache`는 지문이 일치하면 캐시를 쓰고, 아니면 `_embed_wavs`를 호출한다.
+`_embed_wavs`는 각 소스를 ffmpeg로 임시 PCM에 옮겨 개별 벡터를 얻는다.
+ffmpeg 부재와 파일별 디코드 실패는 정상 판정으로 바꾸지 않고 예외를
 올리며, 디코드 실패 이유에는 파일 이름을 포함한다. 참조 샘플은 워커가 교체하지 않는다.
 
 ### `app/pipeline.py`
 
-`match_files_for_names`는 ffmpeg 추출·VAD·질의 창 임베딩을 파일당 한 번만
-실행하고, 모델 락 안에서 이름별 참조 캐시와 `decide`만 반복한다. 음성 트랙이 없는 입력은
-`no_audio` 결과로 끝내고 다른 추출 오류는 예외다. 3초 창이 없으면 참조 모델을 열지 않는다.
+`match_files_for_names`는 ffmpeg 추출 뒤 모델 락 안에서 HTDemucs 분리·VAD·질의 창 임베딩을
+파일당 한 번만 실행하고, 이름별 참조 캐시와 `decide`만 반복한다. 음성 트랙이 없는 입력은
+`no_audio` 결과로 끝내고 추출·분리·모델 오류는 예외다. 3초 창이 없으면 WeSpeaker를 열지 않는다.
 `finally`는 작업 디렉터리를 제거한다.
-`_payload`는 `model`, `threshold`, `window_seconds`, `speech_window_count`와 판정·구간을
+`_payload`는 `model`, `separation`, `score_policy`, `threshold`, `window_seconds`,
+`speech_window_count`와 판정·구간을
 담는다. 점수가 없으면
 `best`를 생략하고, 사유가 없으면 `reason`을 생략한다.
 
@@ -246,16 +276,16 @@ POSIX 게시에는 0600 임시 파일과 hard link를 써 동시 설치 때 기�
 
 ### `tests/test_match.py`
 
-모델 가중치 없이 평균 참조가 개별 샘플의 높은 점수보다 우선함, 임계값의 비반올림 판정,
+모델 가중치 없이 개별 참조 최대값·상위 3창 비반올림 판정,
 3초 창의 50% 경계·미완성 꼬리, 내용 기반 캐시 지문, data 밖 경로·브로커 이름 거절,
-모의 모델을 통한
-파이프라인 결과·임시 디렉터리 정리를 검사한다. 공개 미디어와 실제 모델의 수동 재현
+모의 모델을 통한 파이프라인 결과·분리 실패의 작업 오류·임시 디렉터리 정리, 브로커 시간 초과 뒤 재시도와 복구·종료
+감사 기록을 검사한다. 공개 미디어와 실제 모델의 수동 재현
 실험은 Git 제외 `work/experiments/`에 JSON·로그로 따로 둔다. 테스트 입력 원본은
 Git 제외 `sample/<대상 인물>/` 또는 `sample/<대상 인물> 아님/`에 두며 `data/`의 등록 자료로 세지 않는다.
 
 ### `work/experiments/` 수동 비교 도구
 
-`voice-redesign-20261008/report.md`가 수동 실험의 단일 통합 보고서다. 현재 재현 입력·점수는
+`voice-redesign-20261008/report.md`가 수동 실험의 단일 통합 보고서다. 2026-10-23 비교 입력·점수는
 `full-rerun-20261023/`에 둔다. `benchmark_current.py`, `benchmark_legacy.py`,
 `benchmark_acoustic.py`는 고정 입력 SHA-256과 VAD 창을 확인한 뒤 각각 현행 성우 모델,
 비교 화자 모델, MFCC·파형 NCC의 구간별 원점수를 저장한다. `analyze.py`는 기존
@@ -265,13 +295,86 @@ Git 제외 `sample/<대상 인물>/` 또는 `sample/<대상 인물> 아님/`에 
 참조 WAV 인덱스까지 요구하며 오류로 점수가 없는 조건을 부재 판정으로 바꾸지 않는다.
 `prepare_holdout.py`는 이전 御子柴泉 공식 샘플과 질의 PCM의 SHA-256을 확인해 Windows
 경로만 바꾼 고정 입력 사본을 만든다. `evaluate_holdout_current.py`는 다른 다섯 성우의
-원본 자료로 정한 임계값을 이 별도 성우에 적용하고, 현행 VA의 0.38 판정도 따로 집계한다.
+원본 자료로 정한 임계값을 이 별도 성우에 적용하고, 당시 VA의 0.38 판정도 따로 집계한다.
+
+`cutie-street-2115294062463037463/evaluate_threshold.py`는 `sample/manifest.csv`의
+大西亜玖璃 오디오를 SHA-256으로 검증한 뒤 실제 `match_files_for_names`를 주어진 임계값으로
+재실행한다. 새 CUTIE_STREET_ 부재 음성은 운영과 동일한 AAC 트랙 복사본으로 보존한다.
+`baseline.json`은 기존 0.38 오검출 재현, `threshold-0.38.json`과 `threshold-0.39.json`은
+보존된 전체 대상 입력의 판정·창 점수·모델 ID·실행 시간을 보존한다. 새 부재 라벨을 보고
+임계값을 골랐으므로 독립 검증 결과로 다루지 않는다.
+
+같은 CUTIE_STREET_ 폴더의 `prepare_grid.py`는 보존 AAC를 한 번만 16 kHz mono PCM으로
+만들고 SHA-256을 고정한다. `windows`는 시작점에 정렬된 비중첩 창 가운데 Silero 발화
+비율이 50% 이상인 완전한 창만 남기며 0.1·0.2·0.3·0.4·0.5·1·2·3초 입력을 만든다.
+`analyze_grid.py`는 이전 모델별 성우 제외 보정 요약에 새 부재 음성 점수를 결합한다.
+큰 B6 계산은 구간별 파일로 따로 저장할 수 있어서 동일 입력·가중치 SHA-256을 확인한
+뒤 메모리에서만 병합한다. 이미 기존 양성·음성 점수가 겹치는 조합은 새 음성을 더해도
+단일 점수 임계값으로 완전히 나뉠 수 없다는 점과 사후 분리폭을 함께 기록한다.
+`benchmark_current.py`·`benchmark_legacy.py`·`benchmark_acoustic.py`의 `--durations`는
+고정 사례 파일에 이미 있는 구간 길이 일부만 다시 채점할 때 쓴다.
+`threshold_curves.py`는 저장된 영상·성우 쌍 점수에 scikit-learn ROC·DET를 적용하고
+원래 점수를 보지 않은 대상 성우의 보존 점수도 별도로 판정한다. 이 임계값은 같은
+자료에서 찾은 진단치이지 운영 설정이 아니다. `prepare_negative_crop.py`는 같은 부재
+음성의 원본 PCM 300–330초를 실제로 잘라 긴 영상의 상위 10% 집계가 길이에 따라
+판정을 뒤집는지 재채점할 입력을 만든다.
+
+`prepare_separator_input.py`는 보존 AAC에서 분리기 공통 44.1 kHz stereo PCM을 임시
+공간에 만들고 원본·변환본 해시를 남긴다. `run_separator.py`의 `deepfilter`는
+DeepFilterNet 독립 바이너리에 48 kHz mono와 delay 보정을 쓰고, `audio_separator`는
+이미 받은 UVR·Kim·RoFormer 가중치를 audio-separator에 전달한다. 모델 실패는 결과
+JSON의 오류로 남겨 무음 또는 음성 부재로 치환하지 않는다. `prepare_stem_grid.py`는
+성공한 전체 스템을 16 kHz mono로 읽고 VAD와 8개 길이의 판정 창을 새로 만든다.
+`compare_separator_new.py`는 과거 ANIMAX·qpk·seigura에서 통과한 모델·참조·집계
+조합의 임계값을 유지한 채 새 부재 스템의 점수를 비교한다. 30초씩 분리한 출력의
+이름은 `--prior-method`로 원래 모델의 과거 비교행에 연결한다.
+
+`prepare_deepfilter_controls.py`는 기존 공식 연기·영상과 새 부재 음성 모두를 같은
+16 kHz mono → 48 kHz DeepFilterNet → 16 kHz mono 경로로 처리하며, 원본·출력 해시가
+맞는 완료 항목만 재사용한다. `evaluate_full_controls.py`는 새 음성으로 임계값을 다시
+맞추지 않고 이전 성우 제외 보정값을 전체 대조군에 적용한다. `evaluate_cascade.py`는
+원본 Anime VA의 높은 점수 경로와 DeepFilterNet 뒤 ECAPA의 보조 경로를 영상 단위
+최고점 결합 및 **같은 3초 창** 결합으로 따로 계산한다. 보조 경로의 0.25/0.50은
+현재 대조군을 보고 찾은 값으로 표시하며 다른 대상 성우의 보존 자료도 함께 평가한다.
+`prepare_separator_controls.py`는 audio-separator 비교 입력을 고정 mono PCM 또는
+보존 원본 스테레오 중 고른 경로로 통일해 처리한다. 모델이 mono→stereo에서 발화를
+없애는 경우를 배제 성공으로 오해하지 않기 위한 분기다. 새 음성의 원본 스테레오
+분리 산물은 해시가 맞을 때 재사용한다. `run_chunked_roformer.py`는 긴 스테레오 입력을
+30초씩 분리하고 각 조각의 해시·시간을 저장해 중단 뒤 재시작한다. 합친 스템은
+원본 길이에 맞게 조각별로 잘라 붙이므로 조각 경계의 문맥은 연속 전체 분리와 다르다.
+UVR-MDX-NET의 403초 연속 처리가 메모리 할당 오류를 내므로, 전체 대조군 도구는 새 음성에
+한해 이 조각별 출력의 해시를 확인해 재사용하고 기존 짧은 대조군은 연속 처리한다.
+결과 JSON은 두 입력의 분리 문맥이 다르다는 점을 기록한다.
+`threshold_feasibility_separator.py`는 완성된 3초 분리 음원 점수의 양성 최저와 음성
+최고를 비교해 단일 임계값 가능성과 사후 균형정확도 기준을 기록한다.
+`evaluate_actor_holdout.py`는 대상 성우의 모든 점수를 임계값 학습에서 제외하고 다른
+성우의 점수로 균형정확도 임계값을 정한 뒤 대상 성우의 양성·음성을 평가한다. 지정한
+질의 음성은 학습 전체에서 제외한다. 대상 성우의 다른 녹음은 다른 성우에 대한 음성
+예시로 들어갈 수 있으므로 완전히 새로운 녹음에 대한 검증과는 다르다.
+`evaluate_separator_cascade.py`는 당시 운영한 원본 Anime VA와 분리 음원 화자 점수의 동일
+3초 구간 보조 경계를 계산한다. 사용한 원본 게이트와 보조 임계값은 현재 사례에서
+선택한 사후 수치다. `analyze_melband_b6_new.py`는 저장된 MelBand 전체 대조군과
+새 음성의 조각별 MelBand 점수를 모델 해시로 확인한 뒤 합쳐 임계값 분리 가능성을
+계산한다. `probe_crop_separators.py`는 CDX23·Demucs·MossFormer2를 새 부재 음성의
+300~330초 발췌본이나 403초 전체에 적용해 결과와 해시·시간을 기록한다. 발췌본에서
+높은 점수는 해당 창의 오검출을 증명하지만, 낮은 점수는 전체 음성의 오검출 부재를
+증명하지 않는다.
+`prepare_clearvoice_controls.py`는 보존된 mono PCM 대조군 전부를 같은 MossFormer2
+체크포인트·기본 디코드 설정으로 복원하고 VAD를 다시 계산한다. 이미 끝난 새 음성 전체
+복원본은 원본·출력 해시를 확인한 뒤 재사용한다. 진행 결과는 질의마다 저장해 중단
+뒤 재실행할 수 있다.
+`prepare_demucs_controls.py`는 `--model`의 CDX23 음성 스템 또는 htdemucs 보컬 스템으로
+보존 mono PCM 대조군 전부를 같은 `shifts=0`, `split=true` 경로로 처리한다. 이전 세
+영상의 44.1 kHz 스테레오 분리 점수는 이번 새 음성의 16 kHz 모노 점수와 입력 조건이
+달라 직접 합치지 않는다. 새 음성의 완료 스템만 해시 검증 후 재사용하고 모델별
+처리 대조군·VAD 창은 단계마다 저장한다.
+이 도구와 변환 PCM은 운영 워커가 호출하거나 읽지 않는다.
 
 `bgm-model-comparison/`은 동일한 원본 믹스·양성 2개·발화 있는 음성 1개를 별도 음원 분리기에
 넣는 수동 도구다. `run_remaining.py`는 완료 결과를 재사용하고 모델별 실행·실패·시간을 UTC
 JSONL 한 줄에 남긴다. `--stop-after-failure`는 한 모델의 사례가 실패하거나 제한 시간을 넘으면
 그 모델의 뒤 사례를 실행하지 않는다. `run_clearvoice.py`는 모델 기본 디코드 길이와 선택적인 분할 디코드
-길이를 결과에 기록한다. `score_stem_grid.py`는 분리 결과의 VAD를 다시 구해 현행 Anime VA의
+길이를 결과에 기록한다. `score_stem_grid.py`는 분리 결과의 VAD를 다시 구해 당시 운영한 Anime VA의
 모든 8개 길이·2개 참조 정책 점수를 저장한다. `score_stem_other_models.py`는 동일한 분리
 음원의 3초 창에서 다른 화자 모델·MFCC·파형 NCC를 비교한다. `--method`는 이미 저장된
 나머지 분리 결과를 유지하면서 지정 모델의 스템만 추가 계산할 때 쓴다. `analyze_stem_grid.py`와
@@ -300,7 +403,7 @@ Python으로 새 환경을 만들고 pip 의존성을 설치한다. 3.10 미만�
 경고한다. Windows는 `app.ffmpeg_install`로 ffmpeg/ffprobe를 준비한 뒤 공유 키를
 준비하며, 도구 설치가 실패하면 전체 설치도 실패한다. POSIX는 ffmpeg/ffprobe 부재를
 경고한다. 가중치는 받지 않는다. 설치 뒤 `server.bat`/`worker.sh` 실행을 안내한다.
-더는 WeSpeaker용 Git 설치가 필요 없다.
+두 모델 라이브러리의 고정 Git revision 설치에 Git이 필요하며 WeSpeaker만 `--no-deps`다.
 `uninstall.bat`/`uninstall.sh`는 링크가 아닌 `.venv`만 지우며 `data/`, `sample/`, 캐시·로그·공유 키를
 남긴다. `delete-shared-secret.bat`/`.sh`는 명시적으로 공유 키만 지운다.
 
@@ -325,7 +428,9 @@ essentials ZIP을 내려받는다. `_download`는 크기를 제한하고 `_sha25
 `sample/<인물 이름> 아님/`은 부재로 지정한 대조 입력이다. 실제 화자 신원은 폴더 이름으로
 추측하지 않는다. 둘 다 등록 샘플과 독립되어 `enroll._reference_wavs`가 보지 않는다.
 `sample/manifest.csv`와 각 폴더의 `URL_목록.csv`는 출처 URL, 라벨, 원본 파일 경로,
-SHA-256, 평가 길이를 기록한다. 음성 트랙이 없는 mygirl_official·cocona_nonaka의 원본
+SHA-256, 평가 길이를 기록한다. CUTIE_STREET_의 403.156초 AAC는 원본 MP4의 오디오를
+재인코딩 없이 복사한 발화 있는 부재 대조군이며 309~312초의 기존 오검출을 재현한다.
+음성 트랙이 없는 mygirl_official·cocona_nonaka의 원본
 MP4는 부재 폴더에 보존하되 발화 음성의 음성 표본으로 세지 않는다. 다른 화자가 함께
 있는 영상은 구간별 화자 정답을 모르면 `unverified_speaker_mix`로 둔다. 모델 점수만으로
 정답을 만들지 않는다. 원본 미디어만 보관하고 모델용 변환 PCM·잘라낸 음성은 실험 도구가
@@ -358,8 +463,12 @@ MP4는 부재 폴더에 보존하되 발화 음성의 음성 표본으로 세지
 
 `worker.main`은 서명된 `/status`가 voice 종류를 지원하는지 먼저 확인하고 `/claim`에 `kinds:['voice']`, max=1을 보낸다. 다른 종류를 분석하지 않는다. `run_job`은 요청 이름 중 샘플이 있는 것만 각 미디어에 대조하고 통과 이름을 `found`, 이름별 결과를 `matches`로 돌려준다. 미등록 이름은 파일 다운로드도 하지 않는다. 결과 업로드 후 다음 작업을 즉시 받고, 빈 큐/연결 실패 때 `VOICE_WORKER_INTERVAL_MS`(60초) 뒤 다시 조회한다. 오류는 실제 예외·중첩 원인 요약을 `{error}`로 release하여 브로커의 1회 재시도 정책을 따르며 만료/다른 워커 완료에 따른 서명된 409는 정상 폐기로 처리한다. 모든 입력·판정·업로드 오류는 단계와 함께 UTC 한 줄 감사 로그에 남는다. 브로커는 각 시도의
 원인을 보존하므로 두 번째 실패로 종료돼도 일반적인 `failed twice`만 남지 않는다.
-`_record_failure`는 오류 감사 기록 자체가 실패해도 release를 진행하게 하며, release 성공과
-실패도 job ID로 기록한다.
+`voice_worker_started`는 첫 요청 전에 기록한다. claim 단계의 오류 뒤 요청이 성공하면 빈 큐여도
+`voice_broker_recovered`를 기록한다. `finally`의 `voice_worker_stopped`는 정상 반환 또는
+처리되지 않은 예외 종류·원인을 남기며, 강제 종료처럼 Python `finally`가 실행되지 않으면
+남지 않는다. 설정·공유 키 조회는 감사 로그 생성 전이라 이 단계의 기동 실패도 기록할 수 없다.
+`_record_event`는 복구·종료·오류 감사 기록 자체가 실패해도 release나 종료 처리를 가리지 않게
+하며, release 성공과 실패도 job ID로 기록한다.
 
 음성 트랙이 없는 미디어는 `pipeline.match_files_for_names`가 대상 이름마다 `present:false`,
 `reason:no_audio`, 점수·발화 창 없음으로 반환한다. 디코딩 실패나 모델 오류와 달리 확정된

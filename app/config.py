@@ -1,4 +1,4 @@
-"""Resolve local storage and the frozen, experimentally selected voice model."""
+"""Resolve local storage and the selected separation and speaker-verification policy."""
 
 from __future__ import annotations
 
@@ -16,10 +16,12 @@ WINDOW_SEC = 3.0
 MIN_SPEECH_FRACTION = 0.5
 VAD_MIN_SPEECH_MS = 250
 REFERENCE_CHUNK_SEC = 30.0
-MODEL_REPO = "litagin/anime_speaker_embedding_by_va_ecapa_tdnn_groupnorm"
-MODEL_REVISION = "1677c9702cca7aca7dc5a74b3c76f3c8b05969b7"
-MODEL_SHA256 = "41d5ad6b5c758a03e46ab53388f42394f40bf115aa9d9df25d4adff6e21072ef"
-DEFAULT_COSINE_MIN = 0.38
+WESPEAKER_MODEL = "english"
+WESPEAKER_SHA256 = "47d76239f1e865b273e31e30f691959061ff6565ed6c4e7be9639a65d9662eb5"
+DEMUCS_MODEL = "htdemucs"
+DEMUCS_SHA256 = "8726e21a993978c7ba086d3872e7608d7d5bfca646ca4aca459ffda844faa8b4"
+DEFAULT_TOP3_MIN = 0.4771964776614425
+TOP_WINDOW_COUNT = 3
 logger = logging.getLogger("voiceanalyzer")
 
 
@@ -51,15 +53,15 @@ def load_config(path: Path | None = None) -> Config:
     thresholds = raw.get("thresholds") or {}
     if not isinstance(thresholds, dict):
         raise ValueError("thresholds must be a mapping")
-    ignored = sorted(set(thresholds) & {"ecapa_min", "wespeaker_min", "margin"})
+    ignored = sorted(set(thresholds) & {"ecapa_min", "wespeaker_min", "margin", "voice_min"})
     if ignored:
         logger.warning("legacy voice thresholds ignored - keys=%s", ",".join(ignored))
     if "demucs" in raw:
         logger.warning("legacy demucs settings ignored")
     root = config_path.resolve().parent
-    cosine_min = float(thresholds.get("voice_min", DEFAULT_COSINE_MIN))
+    cosine_min = float(thresholds.get("wespeaker_top3_min", DEFAULT_TOP3_MIN))
     if not -1.0 <= cosine_min <= 1.0:
-        raise ValueError("thresholds.voice_min must be within [-1, 1]")
+        raise ValueError("thresholds.wespeaker_top3_min must be within [-1, 1]")
     config = Config(
         root=root,
         data_dir=(root / "data").resolve(),

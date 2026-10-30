@@ -39,11 +39,15 @@ if errorlevel 1 goto :deps
 echo WARNING: Python 3.12 or newer is not the intended runtime. Python 3.10 or 3.11 is preferred. Continuing.
 
 :deps
+where git >nul 2>&1
+if errorlevel 1 goto :git_missing
 echo Upgrading pip
 "%PY%" -m pip install --upgrade pip
 if errorlevel 1 goto :pip_fail
 echo Installing requirements.txt. This can take a while.
 "%PY%" -m pip install -r requirements.txt
+if errorlevel 1 goto :pip_fail
+"%PY%" -m pip install --no-deps -r requirements-wespeaker.txt
 if errorlevel 1 goto :pip_fail
 
 echo Preparing ffmpeg and ffprobe for Windows media analysis
@@ -120,6 +124,10 @@ exit /b 1
 
 :pip_fail
 echo pip install failed
+exit /b 1
+
+:git_missing
+echo Git is required to install the pinned speaker and separation libraries.
 exit /b 1
 
 :ffmpeg_fail
