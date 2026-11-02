@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from app.config import TOP_WINDOW_COUNT
+
 
 @dataclass(frozen=True)
 class ReferenceEmbedding:
@@ -15,7 +17,6 @@ class ReferenceEmbedding:
 
 @dataclass(frozen=True)
 class Enrollment:
-    mean: np.ndarray
     references: tuple[ReferenceEmbedding, ...]
 
 
@@ -55,27 +56,24 @@ def average_embeddings(vectors: list[np.ndarray]) -> np.ndarray:
 
 
 def decide(windows: list[WindowEmbedding], enrollment: Enrollment, threshold: float) -> MatchDecision:
-    """Take the strongest speech window against the equal-weight reference mean.
-
-    Individual performances identify the nearest example for review; they do
-    not vote independently and cannot turn a sub-threshold mean into a match.
-    """
+    """Average the three strongest window scores against individual references."""
     if not -1.0 <= threshold <= 1.0:
         raise ValueError("cosine threshold must be within [-1, 1]")
     if not enrollment.references:
         raise ValueError("enrollment has no references")
     scored = []
     for window in windows:
-        score = cosine(window.vector, enrollment.mean)
-        nearest = max(enrollment.references,
-                      key=lambda ref: cosine(window.vector, ref.vector))
+        nearest, score = max(((ref, cosine(window.vector, ref.vector))
+                              for ref in enrollment.references), key=lambda item: item[1])
         scored.append({"start": round(window.start, 3), "end": round(window.end, 3),
                        "score": round(score, 4), "reference": nearest.name,
                        "_score": score, "_start": window.start})
     if not scored:
         return MatchDecision(False, None, [])
-    best = min(scored, key=lambda row: (-row["_score"], row["_start"]))
+    ranked = sorted(scored, key=lambda row: (-row["_score"], row["_start"]))
+    chosen = ranked[:TOP_WINDOW_COUNT]
+    aggregate = sum(row["_score"] for row in chosen) / len(chosen)
     shown = lambda row: {key: value for key, value in row.items() if not key.startswith("_")}
-    passing = [shown(row) for row in scored if row["_score"] >= threshold]
-    passing.sort(key=lambda row: row["start"])
-    return MatchDecision(bool(passing), shown(best), passing)
+    best = {**shown(ranked[0]), "aggregate_score": round(aggregate, 6)}
+    segments = sorted((shown(row) for row in chosen), key=lambda row: row["start"])
+    return MatchDecision(aggregate >= threshold, best, segments)

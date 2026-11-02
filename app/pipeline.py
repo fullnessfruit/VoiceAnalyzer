@@ -1,4 +1,4 @@
-"""Find a registered actor in one local file using voiced 3-second windows."""
+"""Find a registered actor in separated vocals using voiced 3-second windows."""
 
 from __future__ import annotations
 
@@ -42,6 +42,11 @@ def match_files_for_names(config: Config, media: Path, names: list[str]) -> list
             if rate != config.sample_rate:
                 raise PathRejected("unexpected sample rate")
 
+            try:
+                samples = hub.separate_vocals(samples, rate, work)
+            except AudioReadError as exc:
+                raise PathRejected("cannot read separated vocals") from exc
+
             regions = speech_regions(samples, hub.vad(), config)
             if not regions:
                 return [_payload(config, name, 0, False, None, [],
@@ -69,7 +74,8 @@ def match_files_for_names(config: Config, media: Path, names: list[str]) -> list
 
 def _payload(config: Config, speaker_id: str, window_count: int,
              present: bool, best: dict | None, segments: list[dict], reason: str | None) -> dict:
-    body = {"present": present, "speaker_id": speaker_id, "model": "anime_va",
+    body = {"present": present, "speaker_id": speaker_id, "model": "wespeaker",
+            "separation": "htdemucs", "score_policy": "individual_top3",
             "threshold": config.cosine_min, "window_seconds": config.window_sec,
             "speech_window_count": window_count, "segments": segments}
     if best is not None:

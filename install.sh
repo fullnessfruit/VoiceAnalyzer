@@ -64,6 +64,11 @@ if "$VPY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else
   echo "WARNING: Python 3.12 or newer is not the intended runtime. Python 3.10 or 3.11 is preferred. Continuing." >&2
 fi
 
+if ! command -v git >/dev/null 2>&1; then
+  echo "Git is required to install the pinned speaker and separation libraries." >&2
+  exit 1
+fi
+
 echo "Upgrading pip"
 if ! "$VPY" -m pip install --upgrade pip; then
   echo "pip install failed" >&2
@@ -72,6 +77,10 @@ fi
 echo "Installing requirements.txt. This can take a while."
 if ! "$VPY" -m pip install -r requirements.txt; then
   echo "pip install failed" >&2
+  exit 1
+fi
+if ! "$VPY" -m pip install --no-deps -r requirements-wespeaker.txt; then
+  echo "Pinned WeSpeaker install failed" >&2
   exit 1
 fi
 
