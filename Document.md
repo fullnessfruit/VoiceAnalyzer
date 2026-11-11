@@ -304,6 +304,18 @@ Git 제외 `sample/<대상 인물>/` 또는 `sample/<대상 인물> 아님/`에 
 보존된 전체 대상 입력의 판정·창 점수·모델 ID·실행 시간을 보존한다. 새 부재 라벨을 보고
 임계값을 골랐으므로 독립 검증 결과로 다루지 않는다.
 
+`new-negatives-20261106/`은 사용자 라벨이 있는 X 게시물 8개(고유 음원 7개)를
+`sample/大西亜玖璃 아님/`에서 읽고 입력 해시와 실제 브로커가 선택한 MP4 주소를
+따로 기록한다. `run_current.py`는 보존된 HLS 음성을 운영 `match_files_for_names`로
+재실행한다. `run_anime_gate.py`, `run_ecapa_gate.py`, `run_raw_wespeaker_gate.py`,
+`run_b6_gate.py`는 운영 WeSpeaker 상위 3창과 **같은 시각**의 원본 음성을 후보
+모델로 채점한다. 두 포스트가 공유한 오디오를 독립 표본으로 세지 않는다.
+`evaluate_fusion.py`는 이전 고정 대조군으로만 결합 가중치·경계를 정하고 새 부재
+음성은 평가에만 사용한다. `summarize.py`는 감사 로그의 실제 MP4 판정과 HLS 수동
+실행·후보 점수를 `summary.json`에 묶어, 양성 최저와 부재 최고가 겹치는지 기록한다.
+양성 4u 입력의 MP4·HLS AAC는 바이트가 같고, 기존 전체 경로 검출 결과를 재사용한다.
+새 부재 점수와 양성 점수의 경계가 겹치거나 너무 좁아 현재 판정 임계값은 바꾸지 않았다.
+
 같은 CUTIE_STREET_ 폴더의 `prepare_grid.py`는 보존 AAC를 한 번만 16 kHz mono PCM으로
 만들고 SHA-256을 고정한다. `windows`는 시작점에 정렬된 비중첩 창 가운데 Silero 발화
 비율이 50% 이상인 완전한 창만 남기며 0.1·0.2·0.3·0.4·0.5·1·2·3초 입력을 만든다.
@@ -430,6 +442,7 @@ essentials ZIP을 내려받는다. `_download`는 크기를 제한하고 `_sha25
 `sample/manifest.csv`와 각 폴더의 `URL_목록.csv`는 출처 URL, 라벨, 원본 파일 경로,
 SHA-256, 평가 길이를 기록한다. CUTIE_STREET_의 403.156초 AAC는 원본 MP4의 오디오를
 재인코딩 없이 복사한 발화 있는 부재 대조군이며 309~312초의 기존 오검출을 재현한다.
+사용자 라벨을 받은 부재 게시물 8개의 M4A는 Chrome에서 확인한 최고 128 kbps HLS 음성 트랙이다. `ariablue_`와 `crocodile_staff`는 동일한 미디어 ID를 참조하므로 파일 이름 두 개가 하나의 오디오 inode를 공유한다. HLS와 브로커가 선택한 MP4의 오디오 점수는 별도로 기록하며 동일하다고 가정하지 않는다.
 음성 트랙이 없는 mygirl_official·cocona_nonaka의 원본
 MP4는 부재 폴더에 보존하되 발화 음성의 음성 표본으로 세지 않는다. 다른 화자가 함께
 있는 영상은 구간별 화자 정답을 모르면 `unverified_speaker_mix`로 둔다. 모델 점수만으로
@@ -461,10 +474,22 @@ MP4는 부재 폴더에 보존하되 발화 음성의 음성 표본으로 세지
 
 `Broker.request`는 ImageAnalyzer와 같은 OCR1 canonical bytes와 `OCR_BROKER_SECRET`으로 요청·응답을 검증한다. HTTP 리다이렉트는 거절하고 30초 요청 한도·8 MiB 응답 한도를 둔다. `BrokerError`는 상태를 보존하되 인증되지 않은 상태 응답을 정상 완료로 취급하지 않는다.
 
+요청은 `Accept-Encoding: gzip`으로 응답 압축을 허용한다. urllib는 자동 해제하지 않으므로
+`gzip.GzipFile`의 제한된 읽기로 해제하고 그 원래 JSON 바이트의 응답 서명을 검증한다.
+전송 바이트와 해제 후 바이트 모두 8MiB 이하만 허용하며 손상·잘림·다른 coding은 실패다.
+서명이 검증된 응답에 `Accept-Encoding: gzip`이 있으면 이후 JSON 제출도 gzip level 1로
+압축한다. 1KiB 미만 또는 절약량이 64바이트·5% 중 하나라도 부족하면 원문을 보내며,
+요청 HMAC은 실제 업로드 바이트를 대상으로 한다. 지원 확인을 위한 추가 요청이나 형식을
+바꾼 자동 재전송은 없다. 음성·영상 다운로드, 분석 결과와 기존 오류 상태 처리는 유지한다.
+
 `worker.main`은 서명된 `/status`가 voice 종류를 지원하는지 먼저 확인하고 `/claim`에 `kinds:['voice']`, max=1을 보낸다. 다른 종류를 분석하지 않는다. `run_job`은 요청 이름 중 샘플이 있는 것만 각 미디어에 대조하고 통과 이름을 `found`, 이름별 결과를 `matches`로 돌려준다. 미등록 이름은 파일 다운로드도 하지 않는다. 결과 업로드 후 다음 작업을 즉시 받고, 빈 큐/연결 실패 때 `VOICE_WORKER_INTERVAL_MS`(60초) 뒤 다시 조회한다. 오류는 실제 예외·중첩 원인 요약을 `{error}`로 release하여 브로커의 1회 재시도 정책을 따르며 만료/다른 워커 완료에 따른 서명된 409는 정상 폐기로 처리한다. 모든 입력·판정·업로드 오류는 단계와 함께 UTC 한 줄 감사 로그에 남는다. 브로커는 각 시도의
 원인을 보존하므로 두 번째 실패로 종료돼도 일반적인 `failed twice`만 남지 않는다.
 `voice_worker_started`는 첫 요청 전에 기록한다. claim 단계의 오류 뒤 요청이 성공하면 빈 큐여도
-`voice_broker_recovered`를 기록한다. `finally`의 `voice_worker_stopped`는 정상 반환 또는
+`voice_broker_recovered`를 감사 로그에 기록하고 콘솔에도 복구 INFO 한 줄을 출력한다.
+성공한 claim이 작업을 주지 않으면 첫 성공과 그 뒤 최대 10분 간격으로 `voice worker idle` INFO를
+콘솔에 출력한다. 이는 인증된 빈 claim 응답을 뜻하며 아직 요청 전인 `ready`와 구분한다.
+작업을 받았을 때와 결과 업로드를 마쳤을 때는 job ID, 완료 시 경과 시간과 검출 인원 수를 콘솔 INFO 한 줄로 출력한다. 게시물 URL·요청 이름·세부 판정은 UTC 감사 로그에 남는다.
+`finally`의 `voice_worker_stopped`는 정상 반환 또는
 처리되지 않은 예외 종류·원인을 남기며, 강제 종료처럼 Python `finally`가 실행되지 않으면
 남지 않는다. 설정·공유 키 조회는 감사 로그 생성 전이라 이 단계의 기동 실패도 기록할 수 없다.
 `_record_event`는 복구·종료·오류 감사 기록 자체가 실패해도 release나 종료 처리를 가리지 않게
