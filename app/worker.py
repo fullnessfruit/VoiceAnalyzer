@@ -17,6 +17,7 @@ from app.named_match import match_requested, requested_speakers
 from app.shared_secret import require_secret
 
 logger = logging.getLogger("voiceanalyzer")
+_IDLE_LOG_INTERVAL_SEC = 10 * 60
 
 
 def _record_event(audit, event: str, **fields) -> None:
@@ -72,6 +73,7 @@ def main():
     battery = BatteryShutdown.from_env()
     verified = False
     claim_error_pending = False
+    last_idle_log_at = None
     try:
         battery.start()
         _record_event(audit, "voice_worker_started", workerId=worker_id)
@@ -88,19 +90,27 @@ def main():
                 result = broker.request("POST", "/claim", {"workerId": worker_id, "max": 1, "kinds": ["voice"]})
                 if claim_error_pending:
                     _record_event(audit, "voice_broker_recovered", workerId=worker_id)
+                    logger.info("voice broker recovered - workerId=%s", worker_id)
                     claim_error_pending = False
                 jobs = result.get("jobs", [])
                 if jobs:
                     job = jobs[0]
                     started = time.monotonic()
                     audit.record("voice_job_started", jobId=job["jobId"], postUrl=job.get("postUrl"), names=job.get("names"))
+                    logger.info("voice worker job started - jobId=%s", job["jobId"])
                     stage = "analysis"
                     payload = run_job(config, job, audit)
                     payload["elapsedMs"] = round((time.monotonic() - started) * 1000)
                     stage = "result_upload"
                     broker.request("POST", f"/jobs/{quote(job['jobId'], safe='')}/result", payload)
                     audit.record("voice_job_finished", jobId=job["jobId"], **payload)
+                    logger.info("voice worker job finished - jobId=%s elapsedMs=%s foundCount=%s",
+                                job["jobId"], payload["elapsedMs"], len(payload.get("found", [])))
                     continue
+                now = time.monotonic()
+                if last_idle_log_at is None or now - last_idle_log_at >= _IDLE_LOG_INTERVAL_SEC:
+                    logger.info("voice worker idle - workerId=%s brokerClaim=empty", worker_id)
+                    last_idle_log_at = now
             except Exception as exc:
                 if job is None and stage == "claim":
                     claim_error_pending = True
