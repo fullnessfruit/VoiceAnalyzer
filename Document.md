@@ -472,7 +472,7 @@ MP4는 부재 폴더에 보존하되 발화 음성의 음성 표본으로 세지
 
 ### `app/broker.py`, `app/worker.py`
 
-`Broker.request`는 ImageAnalyzer와 같은 OCR1 canonical bytes와 `OCR_BROKER_SECRET`으로 요청·응답을 검증한다. HTTP 리다이렉트는 거절하고 30초 요청 한도·8 MiB 응답 한도를 둔다. `BrokerError`는 상태를 보존하되 인증되지 않은 상태 응답을 정상 완료로 취급하지 않는다.
+`Broker.request`는 ImageAnalyzer와 같은 OCR1 canonical bytes와 `OCR_BROKER_SECRET`으로 요청·응답을 검증한다. HTTP 리다이렉트를 거절하며 소켓 대기 시간은 60초, 응답 크기는 8 MiB로 제한한다. `BrokerError`는 상태를 보존하되 인증되지 않은 상태 응답을 정상 완료로 취급하지 않는다.
 
 요청은 `Accept-Encoding: gzip`으로 응답 압축을 허용한다. urllib는 자동 해제하지 않으므로
 `gzip.GzipFile`의 제한된 읽기로 해제하고 그 원래 JSON 바이트의 응답 서명을 검증한다.

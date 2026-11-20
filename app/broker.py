@@ -54,7 +54,7 @@ class Broker:
         headers["Authorization"] = f"OCR1 ts={stamp},nonce={nonce},sig={signature}"
         request = Request(self.url + target, data=None if payload is None else raw, method=method, headers=headers)
         try:
-            response = self.opener.open(request, timeout=30)
+            response = self.opener.open(request, timeout=60)
         except HTTPError as exc:
             response = exc
         with response:
