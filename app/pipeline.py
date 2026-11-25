@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import shutil
 import uuid
+import wave
 from pathlib import Path
 
 import numpy as np
 
 from app.audio import AudioReadError, FFmpegMissing, NoAudioStream, extract_mono, read_mono_pcm16
-from app.config import Config
+from app.config import CONFIRMATION_THRESHOLDS, Config
 from app.enroll import load_enrollment
 from app.models import get_hub
 from app.paths import PathRejected
-from app.scoring import WindowEmbedding, decide
+from app.scoring import WindowEmbedding, cosine, decide
 from app.voice_activity import fixed_windows, speech_regions
 
 def match_files_for_names(config: Config, media: Path, names: list[str]) -> list[dict]:
@@ -65,11 +66,38 @@ def match_files_for_names(config: Config, media: Path, names: list[str]) -> list
                 enrollment = load_enrollment(config, hub, name, work / "refs" / name)
                 decision = decide(embedded, enrollment, config.cosine_min)
                 reason = None if decision.present else "below_threshold"
-                results.append(_payload(config, name, len(windows),
-                                        decision.present, decision.best, decision.segments, reason))
+                result = _payload(config, name, len(windows), decision.present, decision.best, decision.segments, reason)
+                if decision.present and name in CONFIRMATION_THRESHOLDS:
+                    refs = load_enrollment(config, hub, name, work / "va-refs" / name, confirmation=True)
+                    threshold = CONFIRMATION_THRESHOLDS[name]
+                    score, start, reference = _confirm_segments(extracted, rate, decision.segments, refs, hub)
+                    result["confirmation"] = {"model": "anime_va", "score": round(score, 6),
+                                              "threshold": threshold, "start": start, "reference": reference}
+                    result["present"] = score >= threshold
+                    if not result["present"]:
+                        result["reason"] = "below_confirmation_threshold"
+                results.append(result)
             return results
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _confirm_segments(raw_audio: Path, rate: int, segments: list[dict], references, hub) -> tuple[float, float, str]:
+    """Score the same candidate times on the original mix without reloading a long video into RAM."""
+    scores = []
+    with wave.open(str(raw_audio), "rb") as source:
+        if source.getframerate() != rate or source.getsampwidth() != 2 or source.getnchannels() != 1:
+            raise ValueError("unexpected confirmation PCM format")
+        for segment in segments:
+            start, end = round(segment["start"] * rate), round(segment["end"] * rate)
+            source.setpos(start)
+            raw = source.readframes(end - start)
+            if len(raw) != 2 * (end - start):
+                raise ValueError("incomplete confirmation window")
+            vector = hub.embed_anime_va(np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0)
+            score, ref = max((cosine(vector, r.vector), r.name) for r in references.references)
+            scores.append((score, segment["start"], ref))
+    return max(scores)
 
 
 def _payload(config: Config, speaker_id: str, window_count: int,

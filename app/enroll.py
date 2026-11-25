@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from app.audio import AudioReadError, FFmpegMissing, extract_mono, read_mono_pcm16
-from app.config import Config, WESPEAKER_SHA256
+from app.config import ANIME_VA_SHA256, Config, WESPEAKER_SHA256
 from app.models import ModelHub
 from app.paths import PathRejected
 from app.scoring import Enrollment, ReferenceEmbedding, average_embeddings
@@ -26,12 +26,21 @@ def list_speakers(config: Config) -> list[dict]:
             for name, wavs in _reference_wavs(config).items()]
 
 
-def load_enrollment(config: Config, hub: ModelHub, speaker_id: str, work: Path) -> Enrollment:
+def load_enrollment(config: Config, hub: ModelHub, speaker_id: str, work: Path, *, confirmation: bool = False) -> Enrollment:
     """Load only the requested actor; caller owns hub.lock during inference."""
     available = _reference_wavs(config, speaker_id)
     if speaker_id not in available:
         raise PathRejected("speaker not enrolled")
-    return _embed_or_cache(config, hub, speaker_id, available[speaker_id], work)
+    wavs = available[speaker_id]
+    fingerprint = _fingerprint(wavs, ANIME_VA_SHA256 if confirmation else WESPEAKER_SHA256)
+    cache_dir = "enroll_anime_va_v1" if confirmation else "enroll_wespeaker_v1"
+    cache = config.cache_dir / cache_dir / f"{speaker_id}.npz"
+    found = _read_cache(cache, fingerprint, 192 if confirmation else 256)
+    if found is not None:
+        return found
+    enrollment = _embed_wavs(config, hub, wavs, work, confirmation)
+    _write_cache(cache, fingerprint, enrollment)
+    return enrollment
 
 
 def embed_waveform(hub: ModelHub, samples: np.ndarray, sample_rate: int,
@@ -75,8 +84,8 @@ def _reference_wavs(config: Config, speaker_id: str | None = None) -> dict[str, 
     return found
 
 
-def _fingerprint(wavs: list[Path]) -> str:
-    digest = hashlib.sha256((_CACHE_VERSION + WESPEAKER_SHA256).encode())
+def _fingerprint(wavs: list[Path], model_hash: str = WESPEAKER_SHA256) -> str:
+    digest = hashlib.sha256((_CACHE_VERSION + model_hash).encode())
     for path in wavs:
         digest.update(path.name.encode("utf-8"))
         digest.update(b"\0")
@@ -87,11 +96,7 @@ def _fingerprint(wavs: list[Path]) -> str:
     return digest.hexdigest()
 
 
-def _cache_path(config: Config, speaker_id: str) -> Path:
-    return config.cache_dir / "enroll_wespeaker_v1" / f"{speaker_id}.npz"
-
-
-def _read_cache(path: Path, fingerprint: str) -> Enrollment | None:
+def _read_cache(path: Path, fingerprint: str, dimensions: int) -> Enrollment | None:
     if not path.is_file():
         return None
     try:
@@ -100,7 +105,7 @@ def _read_cache(path: Path, fingerprint: str) -> Enrollment | None:
                 return None
             names = [str(name) for name in data["names"]]
             vectors = np.asarray(data["vectors"], dtype=np.float64)
-            if not names or vectors.shape != (len(names), 256):
+            if not names or vectors.shape != (len(names), dimensions):
                 return None
             if not np.isfinite(vectors).all() or np.any(np.linalg.norm(vectors, axis=1) == 0):
                 return None
@@ -124,19 +129,7 @@ def _write_cache(path: Path, fingerprint: str, enrollment: Enrollment) -> None:
         staged.unlink(missing_ok=True)
 
 
-def _embed_or_cache(config: Config, hub: ModelHub, speaker_id: str,
-                    wavs: list[Path], work: Path) -> Enrollment:
-    fingerprint = _fingerprint(wavs)
-    cache = _cache_path(config, speaker_id)
-    found = _read_cache(cache, fingerprint)
-    if found is not None:
-        return found
-    enrollment = _embed_wavs(config, hub, wavs, work)
-    _write_cache(cache, fingerprint, enrollment)
-    return enrollment
-
-
-def _embed_wavs(config: Config, hub: ModelHub, wavs: list[Path], work: Path) -> Enrollment:
+def _embed_wavs(config: Config, hub: ModelHub, wavs: list[Path], work: Path, confirmation: bool) -> Enrollment:
     work.mkdir(parents=True, exist_ok=True)
     references = []
     try:
@@ -149,7 +142,11 @@ def _embed_wavs(config: Config, hub: ModelHub, wavs: list[Path], work: Path) -> 
                 raise PathRejected(str(exc)) from exc
             except AudioReadError as exc:
                 raise PathRejected(f"cannot read media: {wav.name}") from exc
-            vector = embed_waveform(hub, samples, sample_rate, config.reference_chunk_sec)
+            if confirmation:
+                chunks = _windows(samples, sample_rate, config.reference_chunk_sec)
+                vector = average_embeddings([hub.embed_anime_va(chunk) for chunk in chunks])
+            else:
+                vector = embed_waveform(hub, samples, sample_rate, config.reference_chunk_sec)
             references.append(ReferenceEmbedding(wav.name, vector))
     finally:
         shutil.rmtree(work, ignore_errors=True)

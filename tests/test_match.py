@@ -14,7 +14,7 @@ from app.config import load_config
 from app.enroll import _fingerprint
 from app.named_match import requested_speakers
 from app.paths import PathRejected, resolve_media_path
-from app.pipeline import match_files_for_names
+from app.pipeline import _confirm_segments, match_files_for_names
 from app.scoring import (Enrollment, ReferenceEmbedding, WindowEmbedding,
                          decide)
 from app.voice_activity import fixed_windows
@@ -211,3 +211,23 @@ def test_worker_retries_broker_timeout_and_records_recovery(tmp_path, monkeypatc
                                                      "voice_broker_recovered", "voice_worker_stopped"]
     assert events[1]["stage"] == "claim"
     assert events[-1]["reason"] == "KeyboardInterrupt"
+def test_confirmation_uses_the_candidate_times_in_the_raw_mix(tmp_path):
+    import wave
+    from types import SimpleNamespace
+
+    pcm = tmp_path / "original.wav"
+    with wave.open(str(pcm), "wb") as file:
+        file.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        file.writeframes(np.repeat(np.array([-8192, 8192, 16384], dtype="<i2"), 48000).tobytes())
+    starts = []
+    def embed(samples):
+        assert len(samples) == 48000
+        starts.append(samples[0])
+        return np.array([1., 0.]) if samples[0] > 0 else np.array([0., 1.])
+
+    refs = Enrollment((ReferenceEmbedding("ref", np.array([1., 0.])),))
+    score, start, reference = _confirm_segments(pcm, 16000, [{"start": 0., "end": 3.},
+                                                              {"start": 6., "end": 9.}], refs,
+                                               SimpleNamespace(embed_anime_va=embed))
+    assert starts == [-0.25, 0.5]
+    assert (score, start, reference) == (1., 6., "ref")

@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from app.audio import extract_mono, read_mono_pcm16
-from app.config import Config, DEMUCS_MODEL, DEMUCS_SHA256
+from app.config import ANIME_VA_REVISION, ANIME_VA_SHA256, Config, DEMUCS_MODEL, DEMUCS_SHA256
 from app.scoring import l2_normalize
 
 logger = logging.getLogger("voiceanalyzer")
@@ -23,6 +23,7 @@ class ModelHub:
         self.lock = threading.RLock()
         self._device: str | None = None
         self._speaker = None
+        self._anime_va = None
         self._separator = None
         self._vad = None
 
@@ -102,6 +103,35 @@ class ModelHub:
 
                 self._vad = load_silero_vad()
             return self._vad
+
+    def embed_anime_va(self, samples: np.ndarray) -> np.ndarray:
+        """Embed a raw 16 kHz mono recording with the fixed independent VA encoder."""
+        import torch
+        from anime_speaker_embedding import AnimeSpeakerEmbedding
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        with self.lock:
+            if self._anime_va is None:
+                args = dict(repo_id="litagin/anime_speaker_embedding_by_va_ecapa_tdnn_groupnorm",
+                            filename="embedding_model.pth", revision=ANIME_VA_REVISION)
+                try:
+                    checkpoint = Path(hf_hub_download(**args, local_files_only=True))
+                except LocalEntryNotFoundError:
+                    checkpoint = Path(hf_hub_download(**args))
+                with checkpoint.open("rb") as stream:
+                    digest = hashlib.sha256()
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                if digest.hexdigest() != ANIME_VA_SHA256:
+                    raise RuntimeError("Anime VA checkpoint checksum mismatch")
+                self._anime_va = AnimeSpeakerEmbedding(variant="va", ckpt_path=checkpoint, device="cpu").eval()
+            with torch.inference_mode():
+                wave = torch.from_numpy(np.ascontiguousarray(samples, dtype=np.float32)).unsqueeze(0)
+                vector = self._anime_va(wave).detach().cpu().numpy().reshape(-1)
+        if vector.shape != (192,) or not np.isfinite(vector).all() or not np.linalg.norm(vector):
+            raise RuntimeError("invalid Anime VA embedding")
+        return l2_normalize(vector)
 
     def embed_many(self, pieces: list[np.ndarray]) -> np.ndarray:
         """Use WeSpeaker's int16 magnitude fbank input for each voiced window."""

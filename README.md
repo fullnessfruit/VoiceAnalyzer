@@ -78,6 +78,12 @@ Starting at the beginning of the file, it takes nonoverlapping three-second wind
 incomplete tail, and evaluates windows at least 50% covered by VAD speech. There is no speaker
 diarization. Failure to separate vocals or load WeSpeaker is a job error, not an absent verdict.
 
+For the enrolled `大西亜玖璃` voice, a primary match triggers a second comparison with the
+Anime VA encoder on the same three time windows in the original audio. A score of at least
+0.28 in one window confirms the match. The result includes both scores and the confirming
+window. Install the updated Python requirements on the worker before starting it. On first
+use it needs the pinned Anime VA weights in the Hugging Face cache or access to download them.
+
 A per-actor match in the broker result has the following shape:
 
 ```json
