@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import threading
+from types import SimpleNamespace
+import wave
 from urllib.error import URLError
 
 import numpy as np
 import pytest
 
 import app.worker as worker
-from app.config import load_config
+from app.config import SPEAKER_POLICIES, load_config
 from app.enroll import _fingerprint
 from app.named_match import requested_speakers
 from app.paths import PathRejected, resolve_media_path
-from app.pipeline import match_files_for_names
+from app.pipeline import _confirm_segments, match_files_for_names
 from app.scoring import (Enrollment, ReferenceEmbedding, WindowEmbedding,
                          decide)
 from app.voice_activity import fixed_windows
@@ -211,3 +214,51 @@ def test_worker_retries_broker_timeout_and_records_recovery(tmp_path, monkeypatc
                                                      "voice_broker_recovered", "voice_worker_stopped"]
     assert events[1]["stage"] == "claim"
     assert events[-1]["reason"] == "KeyboardInterrupt"
+
+
+def test_primary_floor_is_specific_to_aguri_and_respects_a_stricter_setting(tmp_path):
+    config = _config(tmp_path)
+    assert config.primary_threshold("大西亜玖璃") == 0.505
+    assert config.primary_threshold("another actor") == config.cosine_min
+    assert replace(config, cosine_min=0.6).primary_threshold("大西亜玖璃") == 0.6
+
+
+def test_confirmation_uses_the_candidate_times_in_the_raw_mix(tmp_path):
+    pcm = tmp_path / "original.wav"
+    with wave.open(str(pcm), "wb") as file:
+        file.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        file.writeframes(np.repeat(np.array([-8192, 8192, 16384], dtype="<i2"), 48000).tobytes())
+    starts = []
+    def embed(samples):
+        assert len(samples) == 48000
+        starts.append(samples[0])
+        return np.array([1., 0.]) if samples[0] > 0 else np.array([0., 1.])
+
+    refs = Enrollment((ReferenceEmbedding("ref", np.array([1., 0.])),))
+    present, detail = _confirm_segments(pcm, 16000, [{"start": 0., "end": 3.}, {"start": 6., "end": 9.}],
+                                        refs, SimpleNamespace(embed_anime_va=embed), SPEAKER_POLICIES["大西亜玖璃"])
+    assert starts == [-0.25, 0.5]
+    assert present
+    assert (detail["score"], detail["start"], detail["reference"]) == (1., 6., "ref")
+    assert detail["references"] == [{"name": "ref", "score": 1.}]
+
+
+@pytest.mark.parametrize(("second_peak", "expected"), [(0.26, False), (0.31, True)])
+def test_confirmation_requires_peak_and_reference_support_in_one_window(tmp_path, second_peak, expected):
+    pcm = tmp_path / "windows.wav"
+    with wave.open(str(pcm), "wb") as file:
+        file.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        file.writeframes(np.zeros(96000, dtype="<i2").tobytes())
+    # The first window has a strong single reference and three weak ones.
+    # The second has support from four references but also needs one above the peak threshold.
+    refs = [(0.35, second_peak), (0.1, 0.26), (0.1, 0.26), (0.1, 0.26), (0.0, 0.0)]
+    enrollment = _enrollment(*(np.array([a, b, (1 - a*a - b*b)**0.5]) for a, b in refs))
+    vectors = iter((np.array([1., 0., 0.]), np.array([0., 1., 0.])))
+    hub = SimpleNamespace(embed_anime_va=lambda _: next(vectors))
+    present, detail = _confirm_segments(pcm, 16000, [{"start": 0., "end": 3.}, {"start": 3., "end": 6.}],
+                                        enrollment, hub, SPEAKER_POLICIES["大西亜玖璃"])
+    assert present is expected
+    assert detail["start"] == 3.0
+    assert detail["score"] == second_peak
+    assert detail["mean_score"] == pytest.approx((second_peak + 3 * 0.26) / 4)
+    assert len(detail["references"]) == 4

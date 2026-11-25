@@ -3,6 +3,7 @@ numpy>=1.26
 
 torch>=2.2
 torchaudio>=2.2
+anime-speaker-embedding==0.2.1
 demucs-infer @ git+https://github.com/openmirlab/demucs-infer.git@a8552bb9da29a56018ae2f1828d360cc60830b54
 soundfile>=0.12.1
 requests>=2.31

@@ -78,6 +78,13 @@ Starting at the beginning of the file, it takes nonoverlapping three-second wind
 incomplete tail, and evaluates windows at least 50% covered by VAD speech. There is no speaker
 diarization. Failure to separate vocals or load WeSpeaker is a job error, not an absent verdict.
 
+The enrolled `大西亜玖璃` voice uses a WeSpeaker threshold of at least 0.505. On a primary
+match, Anime VA compares each of the same candidate windows in the original audio against
+the registered recordings. One window must score at least 0.28 against its closest recording
+and average at least 0.25 across its four closest recordings (all recordings if fewer).
+The result reports both scores and thresholds, the selected window and its reference scores. Install the updated Python requirements on the worker before starting it. On first
+use it needs the pinned Anime VA weights in the Hugging Face cache or access to download them.
+
 A per-actor match in the broker result has the following shape:
 
 ```json
@@ -119,7 +126,7 @@ JSON record use UTC. Records include the broker job ID and original post or medi
 ## Configuration and checks
 
 `config.yaml` remains the user's file. The detector reads `thresholds.wespeaker_top3_min` when present;
-otherwise it uses 0.4771964776614425. Old `voice_min`, `ecapa_min`, `wespeaker_min`, and `margin` keys are ignored with a
+otherwise it uses 0.4771964776614425. The speaker-specific floor still applies. Old `voice_min`, `ecapa_min`, `wespeaker_min`, and `margin` keys are ignored with a
 warning. `device` accepts `cpu`, `cuda`, or `auto`; `auto` uses CUDA only when at least 2 GiB is
 reported free, otherwise CPU. Legacy `demucs` settings are ignored. The model, window length,
 speech fraction, and VAD minimum are fixed in code so the
