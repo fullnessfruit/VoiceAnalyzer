@@ -23,9 +23,21 @@ DEMUCS_SHA256 = "8726e21a993978c7ba086d3872e7608d7d5bfca646ca4aca459ffda844faa8b
 DEFAULT_TOP3_MIN = 0.4771964776614425
 ANIME_VA_REVISION = "1677c9702cca7aca7dc5a74b3c76f3c8b05969b7"
 ANIME_VA_SHA256 = "41d5ad6b5c758a03e46ab53388f42394f40bf115aa9d9df25d4adff6e21072ef"
-CONFIRMATION_THRESHOLDS = {"大西亜玖璃": 0.28}
 TOP_WINDOW_COUNT = 3
 logger = logging.getLogger("voiceanalyzer")
+
+
+@dataclass(frozen=True)
+class SpeakerPolicy:
+    wespeaker_floor: float
+    peak_min: float
+    mean_min: float
+    reference_count: int
+
+
+SPEAKER_POLICIES = {
+    "大西亜玖璃": SpeakerPolicy(wespeaker_floor=0.505, peak_min=0.28, mean_min=0.25, reference_count=4),
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +57,10 @@ class Config:
     min_speech_fraction: float = MIN_SPEECH_FRACTION
     vad_min_speech_ms: int = VAD_MIN_SPEECH_MS
     reference_chunk_sec: float = REFERENCE_CHUNK_SEC
+
+    def primary_threshold(self, speaker_id: str) -> float:
+        policy = SPEAKER_POLICIES.get(speaker_id)
+        return max(self.cosine_min, policy.wespeaker_floor) if policy else self.cosine_min
 
 
 def load_config(path: Path | None = None) -> Config:
